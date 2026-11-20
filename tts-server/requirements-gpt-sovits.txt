@@ -40,3 +40,5 @@ pydantic<=2.10.6
 ctranslate2>=4.0,<5
 av>=11
 tqdm
+resampy
+tabulate
