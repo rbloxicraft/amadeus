@@ -33,14 +33,23 @@ def _path(key: str, default: Path) -> Path:
     return default.resolve()
 
 
+def _env_any(keys: tuple[str, ...], default: str) -> str:
+    """Première variable définie parmi `keys` (les anciens noms GLM_* restent acceptés)."""
+    for k in keys:
+        v = os.environ.get(k, "").strip()
+        if v:
+            return v
+    return default
+
+
 class Config:
-    # --- Cerveau (LLM GLM, compatible OpenAI) ---
-    API_KEY = _env("GLM_API_KEY", "")
-    BASE_URL = _env("GLM_BASE_URL", "https://api.z.ai/api/paas/v4")
-    MODEL = _env("GLM_MODEL", "glm-5.3")
-    # Le « thinking » des GLM récents ajoute plusieurs secondes avant le 1er mot :
-    # inutile pour du dialogue court → désactivé par défaut.
-    DISABLE_THINKING = _env_bool("GLM_DISABLE_THINKING", True)
+    # --- Cerveau principal : n'importe quelle API compatible OpenAI ---
+    API_KEY = _env_any(("LLM_API_KEY", "GLM_API_KEY"), "")
+    BASE_URL = _env_any(("LLM_BASE_URL", "GLM_BASE_URL"), "https://api.z.ai/api/paas/v4")
+    MODEL = _env_any(("LLM_MODEL", "GLM_MODEL"), "glm-5.3")
+    # La « réflexion » de certains modèles ajoute plusieurs secondes avant le 1er mot :
+    # inutile pour du dialogue court → désactivée (paramètre ignoré si l'API ne le connaît pas).
+    DISABLE_THINKING = _env_any(("LLM_DISABLE_THINKING", "GLM_DISABLE_THINKING"), "true").lower() in ("1", "true", "yes", "on")
     # --- Cerveau rapide : GPT-OSS 120B chez Groq (gratuit, ~1 s de moins avant la voix) ---
     GROQ_API_KEY = _env("GROQ_API_KEY", "")
     GROQ_BASE_URL = _env("GROQ_BASE_URL", "https://api.groq.com/openai/v1")

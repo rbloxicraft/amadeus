@@ -6,7 +6,7 @@ Sert le frontend et expose l'API :
   POST /api/stt      → transcription (faster-whisper)
   GET  /api/boot     → salutation de démarrage personnalisée
   GET  /api/health   → état des services
-  GET/PUT /api/brain → cerveau choisi (GLM ou GPT-OSS)
+  GET/PUT /api/brain → cerveau choisi (principal ou rapide)
   /api/memory, /api/avatar, /api/sprites → mémoire, modèle 3D, portrait 2D
   POST /api/diag     → incidents de lecture audio (data/voice_diag.log)
 """
@@ -152,12 +152,12 @@ async def chat(body: dict):
     async def gen():
         try:
             ctx = await run_in_threadpool(memory.memory_context, message)
-            # GLM tient le personnage seul ; les autres cerveaux reçoivent un renfort de style
-            persona = SYSTEM_PROMPT + (STYLE_BOOST if llm.current_brain() != "glm" else "")
+            # le cerveau principal tient le personnage seul ; GPT-OSS reçoit un renfort de style
+            persona = SYSTEM_PROMPT + (STYLE_BOOST if llm.current_brain() == "gptoss" else "")
             messages = [{"role": "system", "content": persona + ("\n\n" + ctx if ctx else "")}]
             messages += _session_history(session_id)
             messages.append({"role": "user", "content": message})
-            if llm.current_brain() != "glm" and _user_language(message) != "Japanese":
+            if llm.current_brain() == "gptoss" and _user_language(message) != "Japanese":
                 # GPT-OSS oublie la langue des sous-titres au milieu d'un long contexte :
                 # un rappel en toute fin, juste avant sa réponse
                 lang = _user_language(message)

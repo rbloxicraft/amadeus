@@ -3,7 +3,7 @@
 #
 #    install.bat                 installation interactive (conseille)
 #    install.ps1 -NoVoice        sans la voix GPT-SoVITS (voix de secours)
-#    install.ps1 -GlmKey ... -GlmUrl ... -GroqKey ...   sans questions
+#    install.ps1 -LlmKey ... [-LlmUrl ... -LlmModel ...] [-GroqKey ...] -Yes   sans questions
 #
 #  Chaque etape est sautee si elle est deja faite : relancer le script
 #  repare une installation incomplete sans tout retelecharger.
@@ -11,8 +11,9 @@
 # ============================================================
 param(
     [switch]$NoVoice,
-    [string]$GlmKey = '',
-    [string]$GlmUrl = '',
+    [string]$LlmKey = '',
+    [string]$LlmUrl = '',
+    [string]$LlmModel = '',
     [string]$GroqKey = '',
     [switch]$Yes
 )
@@ -272,48 +273,67 @@ function Read-Secret([string]$prompt) {
 }
 
 function Configure-Keys {
-    Title 'Cles API (le cerveau de Kurisu)'
+    Title 'Cle d API d IA (le cerveau de Kurisu)'
     if (-not (Test-Path $EnvFile)) {
         Copy-Item (Join-Path $Backend '.env.example') $EnvFile
         Info 'Fichier backend\.env cree.'
     }
-    $hasGlm = (Get-EnvValue 'GLM_API_KEY') -notin @('', 'colle-ta-cle-ici')
+    $mainKey = Get-EnvValue 'LLM_API_KEY'
+    if (-not $mainKey) { $mainKey = Get-EnvValue 'GLM_API_KEY' }   # ancien nom
+    $hasMain = $mainKey -notin @('', 'colle-ta-cle-ici')
+    $hasGroq = (Get-EnvValue 'GROQ_API_KEY') -ne ''
 
     # mode sans questions (parametres)
-    if ($GlmKey) { Set-EnvValue 'GLM_API_KEY' $GlmKey; $hasGlm = $true }
-    if ($GlmUrl) { Set-EnvValue 'GLM_BASE_URL' $GlmUrl }
-    if ($GroqKey) { Set-EnvValue 'GROQ_API_KEY' $GroqKey }
-    if ($GlmKey -or $Yes) {
-        if ($hasGlm) { Ok 'Cles enregistrees dans backend\.env' } else { Warn 'GLM_API_KEY manquante : ajoute-la dans backend\.env' }
+    if ($LlmKey) { Set-EnvValue 'LLM_API_KEY' $LlmKey; $hasMain = $true }
+    if ($LlmUrl) { Set-EnvValue 'LLM_BASE_URL' $LlmUrl }
+    if ($LlmModel) { Set-EnvValue 'LLM_MODEL' $LlmModel }
+    if ($GroqKey) { Set-EnvValue 'GROQ_API_KEY' $GroqKey; $hasGroq = $true }
+    if ($LlmKey -or $GroqKey -or $Yes) {
+        if (-not $hasMain -and $hasGroq) { Set-EnvValue 'BRAIN' 'gptoss' }
+        if ($hasMain -or $hasGroq) { Ok 'Cles enregistrees dans backend\.env' } else { Warn 'Aucune cle d API : ajoute-la dans backend\.env' }
         return
     }
 
-    if ($hasGlm -and -not (Ask 'Une cle GLM est deja configuree. La changer ?' $false)) {
-        Ok 'Cle GLM conservee'
-    } else {
-        Info 'Kurisu reflechit grace a GLM. Il te faut une cle API :'
-        Info '  1) z.ai (international)          -> https://z.ai'
-        Info '  2) bigmodel.cn, compte credite   -> https://open.bigmodel.cn'
-        Info '  3) bigmodel.cn, abonnement Coding Plan'
-        $choice = Read-Host '    Ton type de compte (1, 2 ou 3) [1]'
-        $url = switch ($choice.Trim()) {
-            '2' { 'https://open.bigmodel.cn/api/paas/v4' }
-            '3' { 'https://open.bigmodel.cn/api/coding/paas/v4' }
-            default { 'https://api.z.ai/api/paas/v4' }
-        }
-        $key = Read-Secret 'Colle ta cle GLM (elle ne s affiche pas) puis Entree'
+    if (($hasMain -or $hasGroq) -and -not (Ask 'Une cle d API est deja configuree. La changer ?' $false)) {
+        Ok 'Cles conservees'
+        return
+    }
+    Info 'Kurisu a besoin d une cle d API d IA (compatible OpenAI). Recommandations :'
+    Info '  1) Z.ai     -> https://z.ai              le plus fidele au personnage (payant, peu cher)'
+    Info '  2) Groq     -> https://console.groq.com  gratuit et tres rapide, japonais un peu moins naturel'
+    Info '  3) Autre fournisseur compatible OpenAI (adresse et modele a saisir)'
+    $choice = (Read-Host '    Ton choix (1, 2 ou 3) [1]').Trim()
+
+    if ($choice -eq '2') {
+        $key = Read-Secret 'Colle ta cle Groq (elle ne s affiche pas) puis Entree'
         if ($key) {
-            Set-EnvValue 'GLM_API_KEY' $key
-            Set-EnvValue 'GLM_BASE_URL' $url
-            Ok 'Cle GLM enregistree'
-        } else {
-            Warn 'Pas de cle : Kurisu ne pourra pas repondre. Relance install.bat ou edite backend\.env plus tard.'
-        }
+            Set-EnvValue 'GROQ_API_KEY' $key
+            Set-EnvValue 'BRAIN' 'gptoss'
+            Ok 'Cle Groq enregistree (cerveau rapide)'
+        } else { Warn 'Pas de cle : Kurisu ne pourra pas repondre. Relance install.bat plus tard.' }
+        Info 'Plus tard, tu pourras ajouter une 2e cle (Z.ai...) et choisir le cerveau dans Reglages.'
+        return
     }
 
-    $hasGroq = (Get-EnvValue 'GROQ_API_KEY') -ne ''
-    if ($hasGroq) { Ok 'Cle Groq deja configuree' }
-    elseif (Ask 'Ajouter une cle Groq (gratuite, cerveau ~1 s plus rapide, facultatif) ?' $false) {
+    if ($choice -eq '3') {
+        Info 'Exemple d adresse : https://api.fournisseur.com/v1 (voir la documentation du fournisseur).'
+        $url = (Read-Host '    Adresse de l API (base URL)').Trim()
+        $model = (Read-Host '    Nom du modele').Trim()
+        if ($url) { Set-EnvValue 'LLM_BASE_URL' $url }
+        if ($model) { Set-EnvValue 'LLM_MODEL' $model }
+    } else {
+        Set-EnvValue 'LLM_BASE_URL' 'https://api.z.ai/api/paas/v4'
+        Set-EnvValue 'LLM_MODEL' 'glm-5.3'
+    }
+    $key = Read-Secret 'Colle ta cle d API (elle ne s affiche pas) puis Entree'
+    if ($key) {
+        Set-EnvValue 'LLM_API_KEY' $key
+        Ok 'Cle d API enregistree'
+    } else {
+        Warn 'Pas de cle : Kurisu ne pourra pas repondre. Relance install.bat ou edite backend\.env plus tard.'
+    }
+
+    if (-not $hasGroq -and (Ask 'Ajouter aussi une cle Groq (gratuite, cerveau ~1 s plus rapide, facultatif) ?' $false)) {
         Info 'Cree-la sur https://console.groq.com (menu API Keys).'
         $key = Read-Secret 'Colle ta cle Groq (elle ne s affiche pas) puis Entree'
         if ($key) { Set-EnvValue 'GROQ_API_KEY' $key; Ok 'Cle Groq enregistree' }

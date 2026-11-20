@@ -1,203 +1,197 @@
-# AMADEUS — compagnon IA inspiré de Steins;Gate
+# AMADEUS — an AI companion inspired by Steins;Gate
 
-Un compagnon vocal façon **Amadeus** : une IA qui a la personnalité de Kurisu Makise
-(sarcastique, tsundere, passionnée de science), avec une **mémoire à long terme**, la
-**reconnaissance vocale**, un **avatar 3D ou 2D** et une **voix japonaise** générée en
-temps réel par GPT-SoVITS.
+**English** · [Français](README.fr.md)
 
-Tu lui parles en français (ou en anglais) : elle te répond à voix haute en japonais,
-avec les sous-titres dans ta langue, comme un doublage.
+A voice companion in the spirit of **Amadeus**: an AI with Kurisu Makise's personality
+(sarcastic, tsundere, passionate about science), with **long-term memory**, **speech
+recognition**, a **3D avatar** and a **Japanese voice** generated in real time by GPT-SoVITS.
+
+You talk to her in English or French: she answers out loud in Japanese, with subtitles in
+your language, like a dub.
 
 ```
-Navigateur                              Backend (FastAPI)              Modèles
-├─ Avatar VRM 3D / portrait 2D   ←SSE→  ├─ /api/chat : LLM en flux    ├─ GLM ou GPT-OSS (API)
-├─ Mains libres (Silero VAD)            ├─ /api/tts  : voix en flux   ├─ GPT-SoVITS (GPU, local)
-├─ Lecture audio en streaming           ├─ /api/stt  : Whisper        └─ faster-whisper (local)
-└─ Sous-titres, mémoire, réglages       └─ ChromaDB + profil mémoire
+Browser                                 Backend (FastAPI)              Models
+├─ VRM 3D avatar / 2D portrait   ←SSE→  ├─ /api/chat : streamed LLM   ├─ AI API (OpenAI-compatible)
+├─ Hands-free (Silero VAD)              ├─ /api/tts  : streamed voice ├─ GPT-SoVITS (GPU, local)
+├─ Streaming audio playback             ├─ /api/stt  : Whisper        └─ faster-whisper (local)
+└─ Subtitles, memory, settings          └─ ChromaDB + memory profile
 ```
 
-Kurisu commence à parler **environ 3 s** après la fin de ta phrase (2 s avec le cerveau
-GPT-OSS) : tout est en flux continu, la voix démarre dès la première phrase écrite.
+Kurisu starts speaking **about 3 s** after you finish your sentence (2 s with the fast
+brain): everything is streamed, and the voice starts with the very first written sentence.
 
-> Projet de fan, sans lien avec MAGES. / Chiyomaru Studio. **Aucun contenu du jeu ou de
-> l'animé n'est inclus dans ce dépôt** : pas de voix, pas d'image, pas de modèle 3D.
-> L'installateur télécharge le modèle de voix communautaire sur Hugging Face, et c'est
-> toi qui ajoutes, si tu le souhaites, un avatar et un logo (voir plus bas).
+> Fan project, not affiliated with MAGES. / Chiyomaru Studio. **No content from the game or
+> the anime is included in this repository**: no voice, no image, no 3D model. The
+> installer downloads the community voice model from Hugging Face, and you add an avatar
+> and a logo yourself if you want (see below).
 
 ---
 
-## Ce qu'il te faut
+## Requirements
 
-| | Minimum | Conseillé |
+| | Minimum | Recommended |
 |---|---|---|
-| Système | Windows 10 ou 11 (64 bits) | |
-| Carte graphique | — (voix de secours sans GPU) | **NVIDIA**, 6 Go de mémoire vidéo ou plus |
-| Espace disque | 5 Go | 15 Go (avec la vraie voix) |
-| Navigateur | Chrome ou Edge récent | |
-| Clé API | **GLM** (obligatoire) | + **Groq** (gratuite, facultative) |
+| System | Windows 10 or 11 (64-bit) | |
+| Graphics card | — (fallback voice without a GPU) | **NVIDIA**, 6 GB of video memory or more |
+| Disk space | 5 GB | 15 GB (with the real voice) |
+| Browser | Chrome, Edge or Firefox (Zen works too) | |
+| API key | An **AI API key** (see below) | |
 
-L'installateur s'occupe de **Python 3.12** et de **Git** s'ils manquent (via `winget`, avec
-ta permission). Sans carte NVIDIA, tout fonctionne sauf la vraie voix : Kurisu parle avec
-une voix de synthèse de secours.
+The installer takes care of **Python 3.12** and **Git** if they are missing (through
+`winget`, with your permission). Without an NVIDIA card everything works except the real
+voice: Kurisu then speaks with a fallback synthetic voice.
 
 ## Installation
 
-1. **Télécharge le projet** : bouton vert **Code → Download ZIP** sur GitHub, puis
-   extrais-le, par exemple dans `Documents\amadeus`. Ou, avec Git :
+1. **Download the project**: green **Code → Download ZIP** button on GitHub, then extract
+   it, for example to `Documents\amadeus`. Or, with Git:
    ```
    git clone https://github.com/rbloxicraft/amadeus.git
    ```
-   Évite les dossiers synchronisés (OneDrive) : l'installation pèse plusieurs Go.
-2. **Prépare ta clé GLM** (voir [Les clés API](#les-clés-api) juste en dessous).
-3. **Double-clique `install.bat`**. Il :
-   - vérifie la machine (Python 3.12, Git, carte NVIDIA, espace disque) ;
-   - installe le backend (cerveau, oreilles, mémoire) ;
-   - installe le moteur de voix GPT-SoVITS, avec PyTorch pour carte graphique ;
-   - télécharge la voix de Kurisu depuis Hugging Face et la prépare ;
-   - te demande ta clé GLM (et, si tu veux, ta clé Groq) et les enregistre.
+   Avoid synced folders (OneDrive): the installation takes several GB.
+2. **Get an AI API key** (see [The API key](#the-api-key) just below).
+3. **Double-click `install.bat`**. It:
+   - checks the machine (Python 3.12, Git, NVIDIA card, disk space);
+   - installs the backend (brain, ears, memory);
+   - installs the GPT-SoVITS voice engine, with PyTorch for the graphics card;
+   - downloads Kurisu's voice from Hugging Face and prepares it;
+   - asks for your API key and saves it.
 
-   Compte **20 à 40 minutes** la première fois, selon ta connexion (environ 5 Go à
-   télécharger). Si une étape échoue, corrige le problème et relance `install.bat` :
-   les étapes déjà faites sont sautées. Le détail de tout ce qui se passe est dans
-   `data\install.log`.
-4. **Double-clique `start_amadeus.bat`**. Il démarre la voix et le backend, attend qu'ils
-   répondent, puis ouvre http://127.0.0.1:8642 dans ton navigateur. Au tout premier
-   lancement, Whisper et la mémoire téléchargent encore leurs modèles (~2 Go).
-5. Clique **Se connecter** (le navigateur exige un clic avant de jouer du son), autorise
-   le micro, et parle-lui.
+   Allow **20 to 40 minutes** the first time, depending on your connection (about 5 GB to
+   download). If a step fails, fix the problem and run `install.bat` again: steps already
+   done are skipped. Everything is logged in `data\install.log`.
 
-Pour tout arrêter : **`stop_amadeus.bat`**.
+   The installer speaks French; its questions are short (choose 1, 2 or 3, paste your key).
+4. **Double-click `start_amadeus.bat`**. It starts the voice and the backend, waits until
+   they respond, then opens http://127.0.0.1:8642 in your browser. On the very first
+   launch, Whisper and the memory still download their models (~2 GB).
+5. Click **Se connecter** (the browser requires a click before playing sound), allow the
+   microphone, and talk to her.
 
-> Sans carte NVIDIA, ou pour une installation légère : `install.bat -NoVoice`.
+To stop everything: **`stop_amadeus.bat`**.
 
-## Les clés API
+> Without an NVIDIA card, or for a light installation: `install.bat -NoVoice`.
 
-Les clés restent **sur ta machine**, dans `backend\.env`. Ce fichier est exclu de Git :
-il ne part jamais sur GitHub. Ne le partage pas. Pour changer une clé, relance
-`install.bat` ou modifie `backend\.env` avec le Bloc-notes, puis relance Amadeus.
+## The API key
 
-### GLM — le cerveau principal (obligatoire)
+Kurisu thinks through an **AI API compatible with the OpenAI format**. Your key stays **on
+your machine**, in `backend\.env`. That file is excluded from Git: it never goes to GitHub.
+Don't share it. To change a key, run `install.bat` again, or edit `backend\.env` with
+Notepad and restart Amadeus.
 
-C'est le modèle qui fait parler Kurisu ; il tient le mieux le personnage.
+**Recommendations** (the installer offers both):
 
-1. Crée un compte sur **[z.ai](https://z.ai)** (international) ou
-   **[open.bigmodel.cn](https://open.bigmodel.cn)** (Chine).
-2. Ajoute un peu de crédit, ou prends un abonnement, puis crée une **clé API**.
-3. Pendant l'installation, choisis ton type de compte et colle la clé. L'installateur
-   règle l'adresse qui va avec :
+| Provider | Why | Price |
+|---|---|---|
+| **[Z.ai](https://z.ai)** | The most faithful to the character in our tests (natural Japanese, tsundere tone) | Paid, inexpensive |
+| **[Groq](https://console.groq.com)** | About 1 s faster; Japanese a little less natural | Free (per-minute quota) |
 
-| Type de compte | `GLM_BASE_URL` |
+You can set up **both**: in Amadeus, **Réglages → Cerveau** switches between the main brain
+and the fast one (Groq). When Groq's free quota runs out (about 2 to 3 messages a minute
+with Kurisu's memory), the message automatically goes to the main brain: the conversation
+never freezes.
+
+**Another provider?** Any OpenAI-compatible API works: in the installer choose
+"autre fournisseur" (option 3), or set these three lines in `backend\.env`:
+
+```
+LLM_API_KEY=your-key
+LLM_BASE_URL=https://api.provider.com/v1
+LLM_MODEL=model-name
+```
+
+## Avatar and logo (optional)
+
+No character model is provided: each one has its own license.
+
+- **3D avatar**: drop a **`.vrm`** file (exported from [VRoid Studio](https://vroid.com/studio),
+  for example) anywhere on the Amadeus window, or copy it to
+  `frontend\vendor\models\kurisu.vrm`. Without a model, a holographic core is shown. Drag to
+  orbit, scroll to zoom.
+- **2D portrait (experimental)**: there are no 2D images in the project, **you have to import
+  your own**: **Avatar → Importer des images 2D** menu (or drag and drop). One image per
+  expression, named `neutral`, `joy`, `angry`, `sad`, `shy`, `surprised` (French names also
+  accepted); add `_talk` for the open-mouth version (`joy_talk.png`), used while she speaks.
+  A cut-out PNG works best; `neutral` is the only required image. **This mode has only been
+  tested with placeholder images, not with real artwork**: expect rough edges.
+- **Logo**: an image at `frontend\vendor\brand\amadeus-logo.png`. Without it, the name
+  AMADEUS is shown as text.
+
+## Using it
+
+The interface is in French. Main elements:
+
+- **Hands-free** (amber microphone, on by default): speak whenever you want. If you talk
+  while she's answering, she lowers her voice, then stops if your sentence is confirmed (a
+  cough or the echo of her own voice are ignored). Clicking the microphone turns hands-free
+  off: then hold the microphone, or **Space**, to talk.
+- **Conversation**: the written history of your exchanges.
+- **Mémoire**: what she remembers about you. You can edit it; "Tout effacer" starts over.
+  Every exchange is stored (ChromaDB) and, every 6 replies, a summary of who you are is
+  updated and injected into every conversation.
+- **Réglages** (choices are remembered):
+  - **Cerveau**: main brain or fast brain (Groq);
+  - **Avatar en 2D**: your 2D images, or else the 3D model seen flat from the front;
+  - **Fond écran Amadeus**: dark screen, moving green grid, blurred code;
+  - **Compteur de divergence** with nixie tubes.
+
+## Advanced settings (`backend\.env`)
+
+| Variable | Purpose |
 |---|---|
-| z.ai (international) | `https://api.z.ai/api/paas/v4` |
-| bigmodel.cn, compte crédité | `https://open.bigmodel.cn/api/paas/v4` |
-| bigmodel.cn, abonnement Coding Plan | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | Main brain: key, API address, model name |
+| `LLM_DISABLE_THINKING` | `true` (default): turns off "thinking" for models that have it, ~2 s instead of 10+ before the first word |
+| `GROQ_API_KEY` | Fast brain (Groq), optional |
+| `BRAIN` | Brain on the very first launch: `main` or `gptoss` (fast) |
+| `STT_MODEL` | `large-v3-turbo` (default), `medium`, `small` (modest machines) |
+| `STT_LANGUAGE` | `auto` (default), `en` or `fr`: more reliable for short sentences |
+| `TTS_STREAMING_MODE` | `3` (default): steady voice, no gaps; `0`: off |
+| `TTS_TEMPERATURE` / `TTS_TOP_K` / `TTS_TOP_P` | `0.7` / `5` / `0.9`: stable voice |
+| `TTS_LOUDNESS_DB` | `-16`: same volume for every emotion |
 
-> **Erreur 429 « 余额不足 »** : solde épuisé, ou clé Coding Plan utilisée avec la mauvaise
-> adresse. Le Coding Plan est prévu pour les outils de code : pour un usage compagnon
-> intensif, un petit solde standard est plus serein.
+## Troubleshooting
 
-### Groq — le cerveau rapide (facultatif, gratuit)
-
-[Groq](https://console.groq.com) héberge **GPT-OSS 120B** : Kurisu répond environ 1 s plus
-vite, mais son japonais est un peu moins naturel qu'avec GLM.
-
-1. Crée un compte sur [console.groq.com](https://console.groq.com), menu **API Keys**,
-   puis **Create API Key**.
-2. Colle-la quand l'installateur te la propose (ou dans `GROQ_API_KEY` de `backend\.env`).
-3. Dans Amadeus : **Réglages → Cerveau → GPT-OSS 120B**.
-
-L'offre gratuite de Groq est limitée en jetons par minute (environ 2 à 3 messages par
-minute avec la mémoire de Kurisu). Au-delà, le message part automatiquement sur GLM :
-la conversation ne se bloque jamais.
-
-## Avatar et logo (facultatifs)
-
-Aucun modèle de personnage n'est fourni : ils ont chacun leur propre licence.
-
-- **Avatar 3D** : dépose un fichier **`.vrm`** (export [VRoid Studio](https://vroid.com/studio),
-  par exemple) n'importe où sur la fenêtre d'Amadeus, ou copie-le en
-  `frontend\vendor\models\kurisu.vrm`. Sans modèle, un noyau holographique s'affiche.
-  Glisse pour tourner autour, molette pour zoomer.
-- **Portrait 2D** : menu **Avatar → Importer des images 2D** (ou glisser-déposer). Une image
-  par expression, nommée `neutre`, `joie`, `colere`, `triste`, `gene`, `surprise` (noms
-  anglais acceptés). Ajoute `_parle` pour la version bouche ouverte (`joie_parle.png`),
-  utilisée pendant qu'elle parle. PNG détouré conseillé ; `neutre` est la seule image
-  indispensable.
-- **Logo** : une image `frontend\vendor\brand\amadeus-logo.png`. Sans image, le nom
-  AMADEUS s'affiche en texte.
-
-## Utilisation
-
-- **Mains libres** (micro ambre, actif par défaut) : parle quand tu veux. Si tu parles
-  pendant qu'elle répond, elle baisse la voix, puis s'arrête si ta phrase est confirmée
-  (une toux ou l'écho de sa propre voix sont ignorés). Un clic sur le micro coupe les
-  mains libres : tu maintiens alors le micro, ou **Espace**, pour parler.
-- **Conversation** : l'historique écrit de vos échanges.
-- **Mémoire** : ce qu'elle retient de toi. Tu peux le corriger ; « Tout effacer » repart
-  de zéro. Chaque échange est mémorisé (ChromaDB) et, toutes les 6 réponses, un résumé
-  de qui tu es est mis à jour et réinjecté dans chaque conversation.
-- **Réglages** (choix mémorisés) :
-  - **Cerveau** : GLM-5.3 (le plus fidèle) ou GPT-OSS 120B via Groq (plus rapide) ;
-  - **Avatar en 2D** : tes images 2D, ou à défaut le modèle 3D vu de face, à plat ;
-  - **Fond écran Amadeus** : écran sombre, grille verte mouvante, code flou ;
-  - **Compteur de divergence** en tubes nixie.
-
-## Réglages avancés (`backend\.env`)
-
-| Variable | Rôle |
+| Problem | Solution |
 |---|---|
-| `GLM_MODEL` | `glm-5.3` (défaut, meilleur jeu de rôle) ou `glm-4.6` (plus rapide) |
-| `GLM_DISABLE_THINKING` | `true` (défaut) : ~2 s au lieu de 10+ avant le premier mot |
-| `BRAIN` | Cerveau au tout premier lancement : `glm` ou `gptoss` |
-| `STT_MODEL` | `large-v3-turbo` (défaut), `medium`, `small` (machines modestes) |
-| `STT_LANGUAGE` | `auto` (défaut) ou `fr`, plus fiable pour les phrases courtes |
-| `TTS_STREAMING_MODE` | `3` (défaut) : voix régulière, sans blanc ; `0` : désactivé |
-| `TTS_TEMPERATURE` / `TTS_TOP_K` / `TTS_TOP_P` | `0.7` / `5` / `0.9` : voix stable |
-| `TTS_LOUDNESS_DB` | `-16` : même volume pour toutes les émotions |
+| `install.bat` fails | The message names the step; details are in `data\install.log`. Fix it and run it again: completed steps are skipped |
+| "Kurisu ne peut pas répondre" | Missing or rejected key: run `install.bat` again, or check `backend\.env` |
+| "Voix de secours active" | GPT-SoVITS is off or missing: run `start_amadeus.bat` again (or install the voice with `install.bat`) |
+| A service won't start | `start_amadeus.bat` says which one; its window (Amadeus-Voix, minimized, or Amadeus-Backend) shows the error. Run `stop_amadeus.bat`, then start again |
+| The microphone doesn't work | Allow the microphone for `127.0.0.1` in your browser (icon left of the address bar) |
+| The voice cuts out | Every audio gap and interruption is logged in `data\voice_diag.log` |
+| Slow answers | Try the fast brain (Réglages → Cerveau) |
+| VRM rejected | The file must be a valid `.vrm` (VRoid Studio export, for example) |
 
-## Dépannage
-
-| Problème | Solution |
-|---|---|
-| `install.bat` échoue | Le message dit quelle étape ; le détail est dans `data\install.log`. Corrige puis relance : les étapes faites sont sautées |
-| « Kurisu ne peut pas répondre » | Clé manquante ou refusée : relance `install.bat`, ou vérifie `backend\.env` |
-| « Voix de secours active » | GPT-SoVITS éteint ou absent : relance `start_amadeus.bat` (ou installe la voix avec `install.bat`) |
-| Un service ne démarre pas | `start_amadeus.bat` indique lequel ; sa fenêtre (Amadeus-Voix, réduite, ou Amadeus-Backend) montre l'erreur. `stop_amadeus.bat`, puis relance |
-| Le micro ne marche pas | Autorise le micro pour `127.0.0.1` dans Chrome ou Edge (icône à gauche de l'adresse) |
-| Voix qui coupe | Chaque trou de son et chaque interruption sont notés dans `data\voice_diag.log` |
-| Réponses lentes | Essaie le cerveau GPT-OSS (Réglages), ou `GLM_MODEL=glm-4.6` |
-| VRM refusé | Le fichier doit être un `.vrm` valide (export VRoid Studio, par exemple) |
-
-## Structure
+## Project layout
 
 ```
 amadeus/
-├── install.bat            Installation (double-clic)
-├── start_amadeus.bat      Démarre la voix + le backend, ouvre l'interface
-├── stop_amadeus.bat       Arrête tout
-├── scripts/               Logique des trois .bat (PowerShell)
-├── backend/               FastAPI : cerveau (llm, persona), mémoire, Whisper, voix
+├── install.bat            Installation (double-click)
+├── start_amadeus.bat      Starts the voice + backend, opens the interface
+├── stop_amadeus.bat       Stops everything
+├── scripts/               Logic of the three .bat files (PowerShell)
+├── backend/               FastAPI: brain (llm, persona), memory, Whisper, voice
 │   ├── app/
-│   ├── tools/             transcribe_refs.py (préparation de la voix)
-│   └── .env.example       Modèle de configuration (copié en .env à l'installation)
-├── frontend/              Interface (three.js + three-vrm, sans étape de build)
-├── tts-server/            Voix : téléchargement des modèles, correctifs GPT-SoVITS
-│   ├── patches/           Correctifs d'Amadeus appliqués à GPT-SoVITS
-│   └── voice_refs.json    Extraits de référence (un par émotion) à télécharger
-└── data/                  Tes données : mémoire, réglages, journaux (jamais publiées)
+│   ├── tools/             transcribe_refs.py (voice preparation)
+│   └── .env.example       Configuration template (copied to .env on install)
+├── frontend/              Interface (three.js + three-vrm, no build step)
+├── tts-server/            Voice: model download, GPT-SoVITS patches
+│   ├── patches/           Amadeus patches applied to GPT-SoVITS
+│   └── voice_refs.json    Reference clips (one per emotion) to download
+└── data/                  Your data: memory, settings, logs (never published)
 ```
 
-## Crédits
+## Credits
 
-- Voix : modèle GPT-SoVITS de Kurisu entraîné par la communauté,
-  [bysq/TTS-KurisuMakise](https://huggingface.co/bysq/TTS-KurisuMakise), téléchargé à
-  l'installation. Usage personnel uniquement : ne redistribue pas la voix.
-- Moteur de voix : [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (MIT).
-- Reconnaissance vocale : [faster-whisper](https://github.com/SYSTRAN/faster-whisper) ;
-  détection de parole : [Silero VAD](https://github.com/snakers4/silero-vad) via
+- Voice: community-trained GPT-SoVITS model of Kurisu,
+  [bysq/TTS-KurisuMakise](https://huggingface.co/bysq/TTS-KurisuMakise), downloaded at
+  install time. Personal use only: don't redistribute the voice.
+- Voice engine: [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) (MIT).
+- Speech recognition: [faster-whisper](https://github.com/SYSTRAN/faster-whisper); voice
+  activity detection: [Silero VAD](https://github.com/snakers4/silero-vad) via
   [vad-web](https://github.com/ricky0123/vad).
-- 3D : [three.js](https://threejs.org) et [three-vrm](https://github.com/pixiv/three-vrm).
-- Steins;Gate, Makise Kurisu et Amadeus appartiennent à leurs ayants droit
+- 3D: [three.js](https://threejs.org) and [three-vrm](https://github.com/pixiv/three-vrm).
+- Steins;Gate, Makise Kurisu and Amadeus belong to their respective owners
   (MAGES. / Chiyomaru Studio).
 
-Le code de ce dépôt est sous licence [MIT](LICENSE).
+The code in this repository is under the [MIT](LICENSE) license.

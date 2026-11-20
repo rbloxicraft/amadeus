@@ -1,7 +1,7 @@
-"""Client LLM — plusieurs « cerveaux » compatibles OpenAI, au choix dans l'interface.
+"""Client LLM — deux « cerveaux » compatibles OpenAI, au choix dans l'interface.
 
-  glm    : GLM (Zhipu), le plus fidèle au personnage
-  gptoss : GPT-OSS 120B chez Groq, ~1 s plus rapide avant la 1re phrase
+  main   : cerveau principal (LLM_API_KEY / LLM_BASE_URL / LLM_MODEL dans .env)
+  gptoss : GPT-OSS 120B chez Groq (GROQ_API_KEY), gratuit et rapide
 
 Le choix est enregistré dans data/settings.json et s'applique dès le message suivant.
 Les clients sont créés une seule fois par cerveau et réutilisés : la connexion HTTPS
@@ -23,22 +23,26 @@ from .persona import EMOTIONS
 log = logging.getLogger("amadeus.llm")
 
 BRAINS = {
-    "glm": {
-        "label": "GLM-5.3",
-        "detail": "Le plus fidèle à Kurisu",
+    "main": {
+        "label": "Principal",
+        "detail": CONFIG.MODEL,
         "key": CONFIG.API_KEY, "base_url": CONFIG.BASE_URL, "model": CONFIG.MODEL,
-        # le « thinking » des GLM récents ajoute plusieurs secondes : coupé
+        # la « réflexion » de certains modèles ajoute plusieurs secondes : coupée
+        # (paramètre retiré automatiquement si l'API ne le connaît pas)
         "extra": {"extra_body": {"thinking": {"type": "disabled"}}} if CONFIG.DISABLE_THINKING else {},
     },
     "gptoss": {
-        "label": "GPT-OSS 120B",
-        "detail": "Via Groq, environ 1 s plus rapide",
+        "label": "Rapide",
+        "detail": "GPT-OSS 120B via Groq (gratuit)",
         "key": CONFIG.GROQ_API_KEY, "base_url": CONFIG.GROQ_BASE_URL, "model": CONFIG.GROQ_MODEL,
         # modèle à raisonnement : effort minimal, sinon il réfléchit avant de parler
         "extra": {"reasoning_effort": "low"},
     },
 }
-DEFAULT_BRAIN = CONFIG.BRAIN if CONFIG.BRAIN in BRAINS else "glm"
+_ALIASES = {"glm": "main"}   # ancien nom du cerveau principal
+DEFAULT_BRAIN = _ALIASES.get(CONFIG.BRAIN, CONFIG.BRAIN)
+if DEFAULT_BRAIN not in BRAINS:
+    DEFAULT_BRAIN = "main"
 
 _SETTINGS = CONFIG.DATA_DIR / "settings.json"
 _lock = threading.Lock()
@@ -59,6 +63,7 @@ def _configured(brain: str) -> bool:
 def _load_brain() -> str:
     try:
         b = json.loads(_SETTINGS.read_text(encoding="utf-8")).get("brain")
+        b = _ALIASES.get(b, b)
         if b in BRAINS:
             return b
     except (OSError, ValueError):
@@ -75,6 +80,7 @@ def current_brain() -> str:
 
 def set_brain(brain: str) -> None:
     global _brain
+    brain = _ALIASES.get(brain, brain)
     if brain not in BRAINS:
         raise ValueError(f"cerveau inconnu : {brain}")
     if not _configured(brain):
@@ -110,7 +116,7 @@ def current_model() -> str:
 
 def _require_key(brain: str) -> None:
     if not _configured(brain):
-        name = "GROQ_API_KEY" if brain == "gptoss" else "GLM_API_KEY"
+        name = "GROQ_API_KEY" if brain == "gptoss" else "LLM_API_KEY"
         raise RuntimeError(f"{name} manquant dans backend/.env")
 
 
@@ -120,7 +126,7 @@ def get_client(brain: str | None = None) -> AsyncOpenAI:
     if brain not in _async_clients:
         b = BRAINS[brain]
         # Groq : aucun nouvel essai en cas de quota dépassé (429) → bascule immédiate sur
-        # GLM au lieu d'attendre la fin de la minute
+        # cerveau principal au lieu d'attendre la fin de la minute
         _async_clients[brain] = AsyncOpenAI(api_key=b["key"], base_url=b["base_url"], timeout=60.0,
                                             max_retries=0 if brain == "gptoss" else 1)
     return _async_clients[brain]
@@ -154,7 +160,8 @@ def _drop_extra(brain: str, err: Exception) -> bool:
 # ---------------------------------------------------------------- appels
 
 # L'offre gratuite de Groq est limitée en jetons par minute (8 000 pour GPT-OSS 120B,
-# soit 2-3 messages avec la mémoire). Quand elle est épuisée, le message part sur GLM
+# soit 2-3 messages avec la mémoire). Quand elle est épuisée, le message part sur le
+# cerveau principal
 # et Groq est laissé au repos jusqu'à la fin de la fenêtre indiquée par l'API.
 _cooldown_until: dict[str, float] = {}
 
@@ -162,11 +169,11 @@ _cooldown_until: dict[str, float] = {}
 def _route() -> list[str]:
     """Cerveaux à essayer, dans l'ordre."""
     order = [_brain]
-    if _brain != "glm" and _configured("glm"):
+    if _brain != "main" and _configured("main"):
         if time.monotonic() < _cooldown_until.get(_brain, 0):
-            order = ["glm"]
+            order = ["main"]
         else:
-            order.append("glm")
+            order.append("main")
     return order
 
 
@@ -179,7 +186,7 @@ def _rate_limited(brain: str, err: openai.RateLimitError) -> None:
         pass
     wait = min(max(wait, 5.0), 120.0)
     _cooldown_until[brain] = time.monotonic() + wait
-    log.warning("%s : quota par minute atteint → GLM pendant %.0f s", BRAINS[brain]["label"], wait)
+    log.warning("%s : quota par minute atteint → cerveau principal pendant %.0f s", BRAINS[brain]["label"], wait)
 
 
 async def _create(brain: str, **kwargs):
@@ -221,9 +228,9 @@ async def complete(messages: list[dict], max_tokens: int = 800,
 
 def complete_sync(messages: list[dict], max_tokens: int = 800,
                   temperature: float = 0.5) -> str:
-    """Version bloquante (résumés mémoire, scripts). Rien ne presse ici : GLM, plus
-    soigneux, s'il est configuré ; sinon le cerveau choisi."""
-    brain = "glm" if _configured("glm") else _brain
+    """Version bloquante (résumés mémoire, scripts). Rien ne presse ici : le cerveau
+    principal, plus soigneux, s'il est configuré ; sinon le cerveau choisi."""
+    brain = "main" if _configured("main") else _brain
     client = get_sync_client(brain)
     kwargs = dict(model=BRAINS[brain]["model"], messages=messages,
                   temperature=temperature, max_tokens=max_tokens)

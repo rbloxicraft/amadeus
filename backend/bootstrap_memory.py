@@ -32,7 +32,7 @@ def main() -> None:
         f"- [{e.get('ts', '?')}] User: {e.get('user', '')}\n  Kurisu: {e.get('kurisu', '')}"
         for e in exchanges
     )
-    print(f"Résumé de {len(exchanges)} échanges via GLM…")
+    print(f"Résumé de {len(exchanges)} échanges via le cerveau principal…")
     profile = complete_sync(
         [{"role": "user",
           "content": SUMMARIZE_PROMPT.format(profile="(empty — first memories)",

@@ -334,7 +334,7 @@ async function sendMessage(text, { lineEl = null } = {}) {
 }
 
 function explainError(msg) {
-  const key = msg.match(/(GLM|GROQ)_API_KEY/);
+  const key = msg.match(/(LLM|GROQ)_API_KEY/);
   if (key) return `Kurisu ne peut pas répondre : ajoute ta clé ${key[0]} dans backend\\.env (ou relance install.bat), puis relance Amadeus.`;
   if (/401|invalid.*key|authentication/i.test(msg)) return 'La clé API est refusée. Vérifie-la dans backend\\.env (ou relance install.bat).';
   if (/429|余额|insufficient/i.test(msg)) return 'L\'API refuse la requête (quota ou solde épuisé). Vérifie ton compte, ou change de cerveau dans Réglages.';
@@ -700,7 +700,7 @@ async function checkHealth() {
     items.push(['server', 'Le serveur Amadeus ne répond pas. Relance <code>start_amadeus.bat</code>.']);
   } else {
     if (!h.llm.configured) {
-      const key = h.llm.brain === 'gptoss' ? 'GROQ_API_KEY' : 'GLM_API_KEY';
+      const key = h.llm.brain === 'gptoss' ? 'GROQ_API_KEY' : 'LLM_API_KEY';
       items.push(['llm', `Kurisu ne peut pas répondre : ajoute ta clé <code>${key}</code> dans <code>backend\\.env</code> (ou relance <code>install.bat</code>), puis relance Amadeus.`]);
     }
     if (!h.tts.gpt_sovits) items.push(['tts', 'Voix de secours active. Lance <code>tts-server\\start_tts.bat</code> pour entendre la vraie voix de Kurisu.']);
@@ -858,7 +858,7 @@ const divergence = (() => {
   };
 })();
 
-/* ═══════════ Cerveau : GLM ou GPT-OSS (choix enregistré côté serveur) ═══════════ */
+/* ═══════════ Cerveau : principal ou rapide (choix enregistré côté serveur) ═══════════ */
 
 async function setupBrain() {
   const box = $('#brain-options');
