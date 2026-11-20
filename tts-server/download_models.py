@@ -82,6 +82,9 @@ def main() -> int:
     sv = PRETRAINED / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt"
     if not sv.exists():
         fetch("lj1995/GPT-SoVITS", "sv/pretrained_eres2netv2w24s4ep4.ckpt", PRETRAINED)
+    # fast-langdetect (détection de langue de GPT-SoVITS) refuse de démarrer si son
+    # dossier de cache n'existe pas ; il y télécharge ensuite son modèle tout seul
+    (PRETRAINED / "fast_langdetect").mkdir(parents=True, exist_ok=True)
     write_tts_config(ckpt, pth)
 
     print("\nVoix de Kurisu téléchargée.")
