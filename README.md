@@ -1,4 +1,4 @@
-# AMADEUS — an AI companion inspired by Steins;Gate
+# AMADEUS — an AI companion like Makise Kurisu from Steins;Gate
 
 **English** · [Français](README.fr.md)
 
