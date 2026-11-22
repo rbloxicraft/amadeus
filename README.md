@@ -145,6 +145,11 @@ The interface is in French. Main elements:
 | `BRAIN` | Brain on the very first launch: `main` or `gptoss` (fast) |
 | `STT_MODEL` | `large-v3-turbo` (default), `medium`, `small` (modest machines) |
 | `STT_LANGUAGE` | `auto` (default), `en` or `fr`: more reliable for short sentences |
+| `STT_PARTIALS` | Live transcription while you speak. `auto` (default): on with an NVIDIA GPU; `on`; `off` |
+| `VOICE_ANALYSIS` | `true` (default): tells Kurisu how you sounded (pace, pitch, pauses) compared with your usual voice |
+| `VOICE_EMOTION` | `false` (default). `true` adds emotion2vec on CPU, after installing `backend\requirements-emotion.txt` (over 1 GB) |
+| `TTS_EARLY_PHRASE` | `true` (default): starts the voice on the first clause of a reply |
+| `TTS_REACTIONS` | `true` (default): plays a short pre-generated reaction if the reply is slow |
 | `TTS_STREAMING_MODE` | `3` (default): steady voice, no gaps; `0`: off |
 | `TTS_TEMPERATURE` / `TTS_TOP_K` / `TTS_TOP_P` | `0.7` / `5` / `0.9`: stable voice |
 | `TTS_LOUDNESS_DB` | `-16`: same volume for every emotion |
@@ -159,7 +164,7 @@ The interface is in French. Main elements:
 | A service won't start | `start_amadeus.bat` says which one; its window (Amadeus-Voix, minimized, or Amadeus-Backend) shows the error. Run `stop_amadeus.bat`, then start again |
 | The microphone doesn't work | Allow the microphone for `127.0.0.1` in your browser (icon left of the address bar) |
 | The voice cuts out | Every audio gap and interruption is logged in `data\voice_diag.log` |
-| Slow answers | Try the fast brain (Réglages → Cerveau) |
+| Slow answers | Try the fast brain (Réglages → Cerveau). Each voice turn's timings and API cache hit rate are logged as `latence` in `data\voice_diag.log` |
 | VRM rejected | The file must be a valid `.vrm` (VRoid Studio export, for example) |
 
 ## Project layout

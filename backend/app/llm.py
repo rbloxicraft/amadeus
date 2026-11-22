@@ -49,6 +49,7 @@ _lock = threading.Lock()
 _async_clients: dict[str, AsyncOpenAI] = {}
 _sync_clients: dict[str, OpenAI] = {}
 _extra_ok: dict[str, bool] = {k: True for k in BRAINS}   # False si l'API refuse le paramètre
+_usage_ok: dict[str, bool] = {k: True for k in BRAINS}   # False si l'API refuse stream_options
 
 _EMOTION_RE = re.compile(r"^\s*\[(" + "|".join(EMOTIONS) + r")\]\s*")
 
@@ -189,15 +190,28 @@ def _rate_limited(brain: str, err: openai.RateLimitError) -> None:
     log.warning("%s : quota par minute atteint → cerveau principal pendant %.0f s", BRAINS[brain]["label"], wait)
 
 
-async def _create(brain: str, **kwargs):
+def _drop_usage(brain: str, err: Exception, kwargs: dict) -> bool:
+    """Certaines API refusent `stream_options` : on s'en passe, la réponse compte plus."""
+    msg = str(err).lower()
+    if "stream_options" in kwargs and ("stream_options" in msg or "include_usage" in msg):
+        log.warning("%s refuse stream_options → compteurs de cache indisponibles", BRAINS[brain]["label"])
+        _usage_ok[brain] = False
+        del kwargs["stream_options"]
+        return True
+    return False
+
+
+async def _create(brain: str, *, want_usage: bool = False, **kwargs):
     client = get_client(brain)
     kwargs["model"] = BRAINS[brain]["model"]
-    try:
-        return await client.chat.completions.create(**kwargs, **_extra(brain))
-    except openai.BadRequestError as e:
-        if not _drop_extra(brain, e):
-            raise
-        return await client.chat.completions.create(**kwargs)
+    if want_usage and _usage_ok[brain]:
+        kwargs["stream_options"] = {"include_usage": True}
+    while True:
+        try:
+            return await client.chat.completions.create(**kwargs, **_extra(brain))
+        except openai.BadRequestError as e:
+            if not (_drop_usage(brain, e, kwargs) or _drop_extra(brain, e)):
+                raise
 
 
 async def _create_routed(**kwargs):
@@ -211,10 +225,33 @@ async def _create_routed(**kwargs):
             _rate_limited(brain, e)
 
 
-async def stream_chat(messages: list[dict], max_tokens: int = 600):
-    """Stream les deltas de texte du cerveau choisi. Lève une exception en cas d'erreur."""
-    stream = await _create_routed(messages=messages, stream=True, temperature=0.8, max_tokens=max_tokens)
+def read_usage(usage) -> dict:
+    """Compteurs de jetons, quel que soit le fournisseur.
+
+    OpenAI, Groq, Z.ai : usage.prompt_tokens_details.cached_tokens ;
+    DeepSeek : usage.prompt_cache_hit_tokens."""
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    if cached is None:
+        cached = getattr(usage, "prompt_cache_hit_tokens", None)
+    prompt = getattr(usage, "prompt_tokens", None)
+    return {
+        "prompt_tokens": prompt,
+        "cached_tokens": cached,
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "cache_hit_pct": round(100 * cached / prompt) if prompt and cached is not None else None,
+    }
+
+
+async def stream_chat(messages: list[dict], max_tokens: int = 600, usage: dict | None = None):
+    """Stream les deltas de texte du cerveau choisi. Lève une exception en cas d'erreur.
+
+    `usage` : dictionnaire rempli à la fin du flux avec les compteurs de jetons et de cache."""
+    stream = await _create_routed(messages=messages, stream=True, temperature=0.8,
+                                  max_tokens=max_tokens, want_usage=usage is not None)
     async for chunk in stream:
+        if usage is not None and getattr(chunk, "usage", None):
+            usage.update(read_usage(chunk.usage))
         if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 

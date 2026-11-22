@@ -82,6 +82,19 @@ class Config:
     STT_LANGUAGE = _env("STT_LANGUAGE", "auto")
     # Charge Whisper au démarrage (sinon ~10 s au premier appui micro)
     STT_PRELOAD = _env_bool("STT_PRELOAD", True)
+    # Transcription en direct pendant que tu parles. auto = seulement sur carte graphique
+    # (sur processeur, Whisper prendrait du retard) ; on ; off
+    STT_PARTIALS = _env("STT_PARTIALS", "auto").lower()
+    # Analyse du ton de ta voix (débit, hauteur, pauses), transmise à Kurisu
+    VOICE_ANALYSIS = _env_bool("VOICE_ANALYSIS", True)
+    # emotion2vec, facultatif : voir backend/requirements-emotion.txt
+    VOICE_EMOTION = _env_bool("VOICE_EMOTION", False)
+    VOICE_EMOTION_MIN_CONFIDENCE = float(_env("VOICE_EMOTION_MIN_CONFIDENCE", "0.6"))
+    # Démarre la voix sur le début de la 1re phrase, sans attendre sa fin
+    TTS_EARLY_PHRASE = _env_bool("TTS_EARLY_PHRASE", True)
+    TTS_EARLY_PHRASE_MIN_CHARS = int(_env("TTS_EARLY_PHRASE_MIN_CHARS", "8"))
+    # Petites réactions pré-générées (« ふーん… ») si la réponse tarde
+    TTS_REACTIONS = _env_bool("TTS_REACTIONS", True)
 
     # --- Divers ---
     DATA_DIR = (BACKEND_DIR / _env("DATA_DIR", "../data")).resolve()
@@ -95,8 +108,11 @@ class Config:
     MEMORY_SUMMARY_EVERY = 6
     # Nb de souvenirs pertinents injectés par message
     MEMORY_RETRIEVE_K = 4
-    # Historique conservé pour le LLM (messages)
-    HISTORY_MAX_MESSAGES = 24
+    # Historique envoyé au LLM (messages). Il grandit jusqu'à MAX puis retombe d'un coup à
+    # KEEP : retirer les plus vieux à chaque tour décalerait le début du prompt et viderait
+    # le cache de l'API à chaque message.
+    HISTORY_MAX_MESSAGES = 30
+    HISTORY_KEEP_MESSAGES = 18
 
 
 CONFIG = Config()

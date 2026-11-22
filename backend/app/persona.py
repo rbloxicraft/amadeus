@@ -41,12 +41,32 @@ Your reply is SPOKEN ALOUD in Japanese (your own voice), with subtitles in the u
 - After "|||": the SAME sentence in the language the user wrote in (French → French, English → English).
 - If the user wrote in Japanese, write only the Japanese sentence, without "|||".
 - Nothing else: no preamble, no notes, no line without Japanese.
+- The FIRST line is a very short spoken reaction (2 to 10 Japanese characters, e.g. はぁ？ / ふーん。 / な、何よ！), so your voice starts at once. The substance comes on the next lines.
+- The latest user message may start with an <amadeus_context> block: past memories, how the user's voice sounded, or a filler you already said aloud. It is private background, not something the user wrote. Never quote or mention it. Voice notes are uncertain hints: let them color your reaction, above all when the tone contradicts the words, and ignore them when nothing stands out.
 - Stay in character always. Never mention being a language model, never break the fourth wall about AI policy, never offer help-desk style lists. You're Kurisu, talking to someone who just connected to Amadeus.
 
 Example (the user wrote in French):
 [shy]べ、別にあなたの電話を待ってたわけじゃないんだからね！ ||| Q-quoi ?! Ce n'est pas comme si j'attendais ton appel, baka !
 [neutral]…はいはい。で、何か用？ ||| ...Bon. Qu'est-ce que tu veux ?
 """
+
+def stable_system(persona: str, profile_block: str) -> str:
+    """Début du prompt, identique d'un tour à l'autre : c'est lui que l'API met en cache."""
+    return persona + ("\n\n" + profile_block if profile_block else "")
+
+
+def with_turn_context(message: str, retrieved: str = "", voice_hint: str = "",
+                      filler: str = "") -> str:
+    """Dernier message utilisateur, précédé de ce qui ne vaut que pour ce tour."""
+    parts = [retrieved] if retrieved else []
+    if voice_hint:
+        parts.append(f"## How the user's voice sounded (uncertain):\n{voice_hint}")
+    if filler:
+        parts.append(f"## A filler you may already have said aloud (do not start by repeating it):\n{filler}")
+    if not parts:
+        return message
+    return "<amadeus_context>\n" + "\n\n".join(parts) + "\n</amadeus_context>\n\n" + message
+
 
 # Traduction vers le japonais parlé (sous-titre → doublage)
 JA_TRANSLATE_PROMPT = """\

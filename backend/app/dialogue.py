@@ -21,6 +21,7 @@ _TAG_RE = re.compile(r"^\s*\[(" + "|".join(EMOTIONS) + r")\]\s*", re.I)
 _ANY_TAG_RE = re.compile(r"\[[^\]\n]*\]")
 _KANA_RE = re.compile(r"[぀-ヿ]")
 _JAPANESE_RE = re.compile(r"[぀-ヿ一-鿿]")
+_CLAUSE_END = re.compile(r"[、。！？!?…]+")
 
 
 def _clean(s: str) -> str:
@@ -28,10 +29,14 @@ def _clean(s: str) -> str:
 
 
 class LineParser:
-    def __init__(self, user_writes_japanese: bool = True) -> None:
+    def __init__(self, user_writes_japanese: bool = True, early_phrase: bool = False,
+                 early_min_chars: int = 8) -> None:
         # False : une ligne japonaise sans « ||| » est un oubli du modèle → événement
         # `translate` (sous-titre fourni plus tard par set_fr) au lieu d'afficher du japonais
         self.user_ja = user_writes_japanese
+        self.early_phrase = early_phrase
+        self.early_min_chars = early_min_chars
+        self._early = 0          # caractères japonais de la ligne déjà envoyés à la voix
         self.buf = ""            # ligne en cours (incomplète)
         self.i = 0               # index de la phrase en cours
         self.emotion = "neutral"
@@ -107,7 +112,9 @@ class LineParser:
                 # charabia → pas de voix pour cette ligne (traduction de secours si aucune)
                 ja = ""
             if not self._said and ja:
-                out.append({"type": "say", "i": self.i, "ja": ja, "emotion": self.emotion})
+                remainder = ja[self._early:].lstrip()
+                if remainder:
+                    out.append({"type": "say", "i": self.i, "ja": remainder, "emotion": self.emotion})
                 self._said = True
             fr = _clean(fr) if final else fr.lstrip()
             # traduction : on n'envoie que la partie nouvelle
@@ -120,7 +127,9 @@ class LineParser:
             return out
 
         if not final:
-            return out  # pas encore de « ||| » : la phrase japonaise n'est pas finie
+            # pas encore de « ||| » : au mieux, le début de la toute première phrase
+            out += self._early_phrase(rest)
+            return out
 
         text = _clean(rest)
         if not text:
@@ -129,14 +138,14 @@ class LineParser:
         if _KANA_RE.search(text) and not self.user_ja:
             # japonais sans traduction alors que l'utilisateur écrit en français :
             # voix tout de suite, sous-titre traduit à part (set_fr)
-            out.append({"type": "say", "i": self.i, "ja": text, "emotion": self.emotion})
+            out += self._say_rest(text)
             out.append({"type": "translate", "i": self.i, "ja": text})
             self.lines.append({"i": self.i, "ja": text, "fr": "", "emotion": self.emotion})
             self.i += 1
             self._reset_line()
         elif _KANA_RE.search(text):
             # l'utilisateur parle japonais : la ligne sert à la fois de voix et de texte
-            out.append({"type": "say", "i": self.i, "ja": text, "emotion": self.emotion})
+            out += self._say_rest(text)
             out += self._emit_text(text)
             self._close_line(text, text, out)
         elif self.lines and self.lines[-1]["ja"] and not self.lines[-1]["fr"]:
@@ -154,6 +163,28 @@ class LineParser:
             self._displayed += 1
             self._reset_line()
         return out
+
+    def _say_rest(self, ja: str) -> list[dict]:
+        """Voix de la ligne, moins le début déjà envoyé par `_early_phrase`."""
+        remainder = ja[self._early:].lstrip()
+        return [{"type": "say", "i": self.i, "ja": remainder, "emotion": self.emotion}] if remainder else []
+
+    def _early_phrase(self, rest: str) -> list[dict]:
+        """Envoie à la voix le début de la 1re phrase dès sa première ponctuation.
+
+        Une longueur minimale évite de couper un bégaiement (「べ、別に」) ou de faire lire
+        à GPT-SoVITS un fragment trop court pour avoir une intonation correcte."""
+        if not self.early_phrase or self.i != 0 or self._early or self._said or self.lines:
+            return []
+        ja = _clean(rest)
+        if not _KANA_RE.search(ja):
+            return []
+        for m in _CLAUSE_END.finditer(ja):
+            cut = m.end()
+            if cut >= self.early_min_chars and cut < len(ja):
+                self._early = cut
+                return [{"type": "say", "i": self.i, "ja": ja[:cut], "emotion": self.emotion}]
+        return []
 
     def set_fr(self, i: int, fr: str) -> bool:
         """Sous-titre traduit après coup ; False si la ligne en a déjà un."""
@@ -184,6 +215,7 @@ class LineParser:
         self._reset_line()
 
     def _reset_line(self) -> None:
+        self._early = 0
         self._said = False
         self._shown = 0
         self._fr_sent = ""

@@ -47,6 +47,11 @@ _CACHE_MAX = 200
 _tts_cache: "OrderedDict[tuple[str, str], tuple[bytes, str, str]]" = OrderedDict()
 _cache_lock = threading.Lock()
 
+# Réactions neutres, valables quelle que soit la phrase entendue ; pré-générées au
+# démarrage et jamais évincées du cache
+REACTIONS = ("ふーん…", "えっと…", "そうね…", "なるほどね…")
+_reaction_audio: dict[tuple[str, str], tuple[bytes, str, str]] = {}
+
 
 # ---------------------------------------------------------------- références
 
@@ -170,6 +175,8 @@ def _gs_payload(text: str, emotion: str | None, streaming: bool) -> dict:
 def cached(text: str, emotion: str | None) -> tuple[bytes, str, str] | None:
     with _cache_lock:
         key = (text, emotion or "neutral")
+        if key in _reaction_audio:
+            return _reaction_audio[key]
         if key in _tts_cache:
             _tts_cache.move_to_end(key)
             return _tts_cache[key]
@@ -360,3 +367,26 @@ def warmup(wait_s: float = 180.0) -> None:
             log.warning("Préchauffage voix %s impossible (%s)", emo, e)
             return
     log.info("Voix préchauffée (%d références, %.1f s)", len(_REFS), time.monotonic() - t0)
+    if CONFIG.TTS_REACTIONS:
+        _prepare_reactions()
+
+
+def _prepare_reactions() -> None:
+    for text in REACTIONS:
+        try:
+            r = _http.post(f"{CONFIG.TTS_URL}/tts", json=_gs_payload(text, "neutral", False), timeout=60)
+            if r.status_code != 200 or not r.content.startswith(b"RIFF"):
+                log.warning("Réaction %s non générée (%s)", text, r.status_code)
+                continue
+            gain = _Gain(_ref("neutral")["gain"])
+            wav = bytearray(gain.feed(r.content))
+            with _cache_lock:
+                _reaction_audio[(text, "neutral")] = (bytes(_fix_wav_sizes(wav)), "audio/wav", "gpt-sovits")
+        except Exception as e:
+            log.warning("Réaction %s non générée (%s)", text, e)
+    log.info("Réactions prêtes : %d/%d", len(_reaction_audio), len(REACTIONS))
+
+
+def reactions_ready() -> list[str]:
+    with _cache_lock:
+        return [t for t, _ in _reaction_audio]

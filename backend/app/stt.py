@@ -6,6 +6,8 @@ import sys
 import threading
 from pathlib import Path
 
+import numpy as np
+
 from .config import CONFIG
 
 log = logging.getLogger("amadeus.stt")
@@ -13,8 +15,15 @@ log = logging.getLogger("amadeus.stt")
 _model = None
 # Indice de vocabulaire : sans lui, Whisper entend « Curissu » au lieu de « Kurisu »
 _VOCAB = "Kurisu, Amadeus, Christina, Okabe, Mayuri, Daru, Suzuha, Steins;Gate."
+_FILLER_PROMPTS = {
+    "fr": " Euh… bah, je sais pas… hmm, attends, ah ouais ?",
+    "en": " Um… well, I don't know… hmm, wait, oh yeah?",
+}
 _model_device = None
+_last_language: str | None = None
 _load_lock = threading.Lock()
+# Une inférence à la fois : une passe provisoire ne doit pas ralentir la passe finale
+_infer_lock = threading.Lock()
 
 
 def _add_cuda_dll_dirs() -> None:
@@ -80,29 +89,67 @@ def _cpu_fallback():
         return _model
 
 
-def _transcribe(model, audio_bytes: bytes) -> dict:
-    lang = None if CONFIG.STT_LANGUAGE in ("", "auto") else CONFIG.STT_LANGUAGE
-    segments, info = model.transcribe(
-        io.BytesIO(audio_bytes),          # décodé en mémoire par PyAV, pas de fichier temporaire
-        language=lang,
-        vad_filter=True,
-        beam_size=1,
-        condition_on_previous_text=False,
-        initial_prompt=_VOCAB,
-    )
-    text = "".join(seg.text for seg in segments).strip()
+def _prompt(language: str | None) -> str:
+    """Whisper imite le style de son amorce : avec des hésitations, il garde les « euh »."""
+    return _VOCAB + _FILLER_PROMPTS.get(language or "", "")
+
+
+def _transcribe(model, audio, *, vad: bool, partial: bool) -> dict:
+    global _last_language
+    forced = None if CONFIG.STT_LANGUAGE in ("", "auto") else CONFIG.STT_LANGUAGE
+    known = forced or _last_language
+    # provisoire : la langue de la dernière phrase évite une détection à chaque passage
+    lang = forced or (known if partial else None)
+    options = {"temperature": 0.0, "without_timestamps": True} if partial else {}
+    with _infer_lock:
+        segments, info = model.transcribe(
+            audio,
+            language=lang,
+            vad_filter=vad,
+            beam_size=1,
+            condition_on_previous_text=False,
+            initial_prompt=_prompt(known),
+            **options,
+        )
+        # `segments` est un générateur : l'inférence se fait ici, sous le verrou
+        text = "".join(seg.text for seg in segments).strip()
+    if text and not partial:
+        _last_language = info.language
     return {"text": text, "language": info.language}
+
+
+def _run(audio, *, vad: bool, partial: bool) -> dict:
+    model = get_model()
+    try:
+        return _transcribe(model, audio, vad=vad, partial=partial)
+    except RuntimeError:
+        # DLL CUDA manquante & co : le GPU a chargé mais échoue à l'usage
+        return _transcribe(_cpu_fallback(), audio, vad=vad, partial=partial)
 
 
 def warmup() -> None:
     get_model()
 
 
-def transcribe(audio_bytes: bytes) -> dict:
+def partials_enabled() -> bool:
+    """Transcription en direct : sur GPU en auto ; sur CPU elle prendrait du retard."""
+    if CONFIG.STT_PARTIALS == "on":
+        return True
+    return CONFIG.STT_PARTIALS == "auto" and _model_device == "cuda"
+
+
+def decode(audio_bytes: bytes) -> np.ndarray:
+    """wav/webm/mp3 → float32 mono 16 kHz (PyAV, en mémoire)."""
+    from faster_whisper.audio import decode_audio
+
+    return decode_audio(io.BytesIO(audio_bytes), sampling_rate=16000)
+
+
+def transcribe_pcm(audio: np.ndarray, *, partial: bool = False, vad: bool = False) -> dict:
+    """→ {text, language}. `vad=False` : l'audio a déjà été découpé par le navigateur."""
+    return _run(audio, vad=vad, partial=partial)
+
+
+def transcribe(audio_bytes: bytes, *, vad: bool = True) -> dict:
     """→ {text, language}. Accepte wav/webm/mp3 (décodage via PyAV)."""
-    model = get_model()
-    try:
-        return _transcribe(model, audio_bytes)
-    except RuntimeError:
-        # DLL CUDA manquante & co : le GPU a chargé mais échoue à l'usage
-        return _transcribe(_cpu_fallback(), audio_bytes)
+    return _run(decode(audio_bytes), vad=vad, partial=False)
