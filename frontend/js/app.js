@@ -841,7 +841,7 @@ async function checkHealth() {
     items.push(['server', 'Le serveur Amadeus ne répond pas. Relance <code>start_amadeus.bat</code>.']);
   } else {
     if (!h.llm.configured) {
-      const key = h.llm.brain === 'gptoss' ? 'GROQ_API_KEY' : 'LLM_API_KEY';
+      const key = { gptoss: 'GROQ_API_KEY', deepseek: 'DEEPSEEK_API_KEY' }[h.llm.brain] || 'LLM_API_KEY';
       items.push(['llm', `Kurisu ne peut pas répondre : ajoute ta clé <code>${key}</code> dans <code>backend\\.env</code> (ou relance <code>install.bat</code>), puis relance Amadeus.`]);
     }
     if (!h.tts.gpt_sovits) items.push(['tts', 'Voix de secours active. Lance <code>tts-server\\start_tts.bat</code> pour entendre la vraie voix de Kurisu.']);

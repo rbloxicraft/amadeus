@@ -141,8 +141,10 @@ The interface is in French. Main elements:
 |---|---|
 | `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | Main brain: key, API address, model name |
 | `LLM_DISABLE_THINKING` | `true` (default): turns off "thinking" for models that have it, ~2 s instead of 10+ before the first word |
-| `GROQ_API_KEY` | Fast brain (Groq), optional |
-| `BRAIN` | Brain on the very first launch: `main` or `gptoss` (fast) |
+| `GROQ_API_KEY` | Fast brain (Groq), optional. Also powers Kurisu's web search |
+| `DEEPSEEK_API_KEY` | DeepSeek brain, optional (paid, very cheap): fast and steady, no per-minute quota; also the fallback when Groq's free quota runs out |
+| `BRAIN` | Brain on the very first launch: `main`, `gptoss` (fast) or `deepseek` |
+| `WEATHER_CITY` | Default city for the weather tool (Kurisu also knows the date and time, and can search the web) |
 | `STT_MODEL` | `large-v3-turbo` (default), `medium`, `small` (modest machines) |
 | `STT_LANGUAGE` | `auto` (default), `en` or `fr`: more reliable for short sentences |
 | `STT_PARTIALS` | Live transcription while you speak. `auto` (default): on with an NVIDIA GPU; `on`; `off` |

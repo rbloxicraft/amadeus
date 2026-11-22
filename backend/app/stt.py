@@ -2,6 +2,7 @@
 import io
 import logging
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -112,10 +113,29 @@ def _transcribe(model, audio, *, vad: bool, partial: bool) -> dict:
             **options,
         )
         # `segments` est un générateur : l'inférence se fait ici, sous le verrou
-        text = "".join(seg.text for seg in segments).strip()
+        text = _unloop("".join(seg.text for seg in segments).strip())
     if text and not partial:
         _last_language = info.language
     return {"text": text, "language": info.language}
+
+
+# Whisper part parfois en boucle sur du bruit (« c'est bon, c'est bon, c'est bon… ») : un
+# même bout de phrase répété au moins 3 fois d'affilée est ramené à une seule fois
+_LOOP_RE = re.compile(r"(\S.{3,80}?)(?:[\s,.!?…-]*\1){2,}", re.S | re.I)
+_SEP = " ,.!?…-"
+
+
+def _unloop(text: str) -> str:
+    for _ in range(5):
+        m = _LOOP_RE.search(text)
+        if not m:
+            break
+        unit, rest = m.group(1), text[m.end():]
+        tail = rest.strip(_SEP)
+        if tail and unit.lower().startswith(tail.lower()):   # dernière répétition coupée
+            rest = ""
+        text = (text[:m.start()] + unit.rstrip(_SEP) + rest).strip()
+    return text
 
 
 def _run(audio, *, vad: bool, partial: bool) -> dict:

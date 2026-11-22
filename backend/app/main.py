@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import emotion, live, memory, stt, tts, voice
+from . import emotion, live, memory, stt, tools, tts, voice
 from .config import CONFIG
 from .dialogue import LineParser
 from . import llm
@@ -207,14 +207,14 @@ async def chat(body: dict):
                 hits = [h for h in hits if h.get("user", "").strip() not in seen]
             timing["memory_ms"] = ms()
             # le cerveau principal tient le personnage seul ; GPT-OSS reçoit un renfort de style
-            persona = SYSTEM_PROMPT + (STYLE_BOOST if llm.current_brain() == "gptoss" else "")
+            persona = SYSTEM_PROMPT + (STYLE_BOOST if llm.current_brain() in llm.STYLE_BOOSTED else "")
             # du plus stable au plus variable : l'API réutilise le début commun des requêtes
             messages = [{"role": "system",
                          "content": stable_system(persona, memory.profile_block(profile))}]
             messages += history
             messages.append({"role": "user", "content": with_turn_context(
-                message, memory.retrieved_block(hits), voice_hint, filler)})
-            if llm.current_brain() == "gptoss" and _user_language(message) != "Japanese":
+                message, memory.retrieved_block(hits), voice_hint, filler, tools.now_note())})
+            if llm.current_brain() in llm.STYLE_BOOSTED and _user_language(message) != "Japanese":
                 # GPT-OSS oublie la langue des sous-titres au milieu d'un long contexte :
                 # un rappel en toute fin, juste avant sa réponse
                 lang = _user_language(message)
@@ -246,7 +246,7 @@ async def chat(body: dict):
                     subtitles.remove(t)
                     yield t
 
-            async for delta in stream_chat(messages, usage=usage):
+            async for delta in stream_chat(messages, usage=usage, tools=True):
                 timing.setdefault("llm_first_token_ms", ms())
                 for s in relay(parser.feed(delta)):
                     yield s

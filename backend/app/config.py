@@ -54,6 +54,12 @@ class Config:
     GROQ_API_KEY = _env("GROQ_API_KEY", "")
     GROQ_BASE_URL = _env("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
     GROQ_MODEL = _env("GROQ_MODEL", "openai/gpt-oss-120b")
+    # DeepSeek (payant, très peu cher) : rapide et régulier, sans quota par minute
+    DEEPSEEK_API_KEY = _env("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_BASE_URL = _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    DEEPSEEK_MODEL = _env("DEEPSEEK_MODEL", "deepseek-flash")
+    # Ville de la météo quand on ne précise pas laquelle (outil météo)
+    WEATHER_CITY = _env("WEATHER_CITY", "")
     # Cerveau au premier démarrage : glm ou gptoss (ensuite, choix fait dans l'interface)
     BRAIN = _env("BRAIN", "glm")
 

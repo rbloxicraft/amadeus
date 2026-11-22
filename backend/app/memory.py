@@ -126,7 +126,9 @@ def _update_profile(exchanges: list[dict]) -> None:
         new_profile = complete_sync(
             [{"role": "user",
               "content": SUMMARIZE_PROMPT.format(profile=profile, exchanges=lines)}],
-            max_tokens=900,
+            # large : la réflexion des modèles « thinking » compte dans la limite ; un
+            # résumé coupé écraserait la fin du profil → refusé (whole) et réessayé plus tard
+            max_tokens=4000, whole=True,
         )
         if new_profile:
             save_profile(new_profile)

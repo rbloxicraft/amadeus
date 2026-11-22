@@ -1,7 +1,8 @@
 """Client LLM — deux « cerveaux » compatibles OpenAI, au choix dans l'interface.
 
   main   : cerveau principal (LLM_API_KEY / LLM_BASE_URL / LLM_MODEL dans .env)
-  gptoss : GPT-OSS 120B chez Groq (GROQ_API_KEY), gratuit et rapide
+  gptoss : GPT-OSS 120B chez Groq (GROQ_API_KEY), gratuit et rapide, mais quota par minute
+  deepseek : DeepSeek (DEEPSEEK_API_KEY), rapide et régulier, payant (très peu cher)
 
 Le choix est enregistré dans data/settings.json et s'applique dès le message suivant.
 Les clients sont créés une seule fois par cerveau et réutilisés : la connexion HTTPS
@@ -38,7 +39,16 @@ BRAINS = {
         # modèle à raisonnement : effort minimal, sinon il réfléchit avant de parler
         "extra": {"reasoning_effort": "low"},
     },
+    "deepseek": {
+        "label": "DeepSeek",
+        "detail": f"{CONFIG.DEEPSEEK_MODEL} (rapide, régulier)",
+        "key": CONFIG.DEEPSEEK_API_KEY, "base_url": CONFIG.DEEPSEEK_BASE_URL, "model": CONFIG.DEEPSEEK_MODEL,
+        "extra": {},
+    },
 }
+# cerveaux qui ont besoin du renfort de style (persona.STYLE_BOOST) et du rappel de format
+STYLE_BOOSTED = {"gptoss", "deepseek"}
+_KEY_NAMES = {"main": "LLM_API_KEY", "gptoss": "GROQ_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
 _ALIASES = {"glm": "main"}   # ancien nom du cerveau principal
 DEFAULT_BRAIN = _ALIASES.get(CONFIG.BRAIN, CONFIG.BRAIN)
 if DEFAULT_BRAIN not in BRAINS:
@@ -117,8 +127,7 @@ def current_model() -> str:
 
 def _require_key(brain: str) -> None:
     if not _configured(brain):
-        name = "GROQ_API_KEY" if brain == "gptoss" else "LLM_API_KEY"
-        raise RuntimeError(f"{name} manquant dans backend/.env")
+        raise RuntimeError(f"{_KEY_NAMES[brain]} manquant dans backend/.env")
 
 
 def get_client(brain: str | None = None) -> AsyncOpenAI:
@@ -168,14 +177,12 @@ _cooldown_until: dict[str, float] = {}
 
 
 def _route() -> list[str]:
-    """Cerveaux à essayer, dans l'ordre."""
-    order = [_brain]
-    if _brain != "main" and _configured("main"):
-        if time.monotonic() < _cooldown_until.get(_brain, 0):
-            order = ["main"]
-        else:
-            order.append("main")
-    return order
+    """Cerveaux à essayer, dans l'ordre : le choisi, puis les secours (DeepSeek, le plus
+    rapide, avant le principal). Un cerveau au quota épuisé est sauté un moment."""
+    order = [b for b in (_brain, "deepseek", "main") if _configured(b)]
+    order = list(dict.fromkeys(order)) or [_brain]
+    ready = [b for b in order if time.monotonic() >= _cooldown_until.get(b, 0)]
+    return ready or order[-1:]
 
 
 def _rate_limited(brain: str, err: openai.RateLimitError) -> None:
@@ -187,7 +194,7 @@ def _rate_limited(brain: str, err: openai.RateLimitError) -> None:
         pass
     wait = min(max(wait, 5.0), 120.0)
     _cooldown_until[brain] = time.monotonic() + wait
-    log.warning("%s : quota par minute atteint → cerveau principal pendant %.0f s", BRAINS[brain]["label"], wait)
+    log.warning("%s : quota par minute atteint → cerveau de secours pendant %.0f s", BRAINS[brain]["label"], wait)
 
 
 def _drop_usage(brain: str, err: Exception, kwargs: dict) -> bool:
@@ -243,17 +250,45 @@ def read_usage(usage) -> dict:
     }
 
 
-async def stream_chat(messages: list[dict], max_tokens: int = 600, usage: dict | None = None):
+async def stream_chat(messages: list[dict], max_tokens: int = 600, usage: dict | None = None,
+                      tools: bool = False):
     """Stream les deltas de texte du cerveau choisi. Lève une exception en cas d'erreur.
 
-    `usage` : dictionnaire rempli à la fin du flux avec les compteurs de jetons et de cache."""
-    stream = await _create_routed(messages=messages, stream=True, temperature=0.8,
-                                  max_tokens=max_tokens, want_usage=usage is not None)
-    async for chunk in stream:
-        if usage is not None and getattr(chunk, "usage", None):
-            usage.update(read_usage(chunk.usage))
-        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-            yield chunk.choices[0].delta.content
+    `usage` : dictionnaire rempli à la fin du flux avec les compteurs de jetons et de cache.
+    `tools` : le cerveau peut appeler les outils (météo, recherche web). Le texte arrive
+    toujours au fil de l'eau ; s'il demande un outil, on l'exécute et on relance (2 fois max)."""
+    from . import tools as tl
+    messages = list(messages)
+    for round_ in range(3):
+        kw = {"tools": tl.specs()} if tools and round_ < 2 else {}
+        stream = await _create_routed(messages=messages, stream=True, temperature=0.8,
+                                      max_tokens=max_tokens, want_usage=usage is not None, **kw)
+        text, calls = "", {}
+        async for chunk in stream:
+            if usage is not None and getattr(chunk, "usage", None):
+                usage.update(read_usage(chunk.usage))
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                text += delta.content
+                yield delta.content
+            for tc in (delta.tool_calls or []) if delta else []:
+                c = calls.setdefault(tc.index or 0, {"id": "", "name": "", "args": ""})
+                c["id"] = tc.id or c["id"]
+                if tc.function:
+                    c["name"] += tc.function.name or ""
+                    c["args"] += tc.function.arguments or ""
+        if not calls:
+            return
+        calls = [c for _, c in sorted(calls.items())]
+        messages.append({"role": "assistant", "content": text or None, "tool_calls": [
+            {"id": c["id"] or f"call_{i}", "type": "function",
+             "function": {"name": c["name"], "arguments": c["args"] or "{}"}}
+            for i, c in enumerate(calls)]})
+        for i, c in enumerate(calls):
+            messages.append({"role": "tool", "tool_call_id": c["id"] or f"call_{i}",
+                             "content": await tl.run(c["name"], c["args"])})
 
 
 async def complete(messages: list[dict], max_tokens: int = 800,
@@ -264,9 +299,11 @@ async def complete(messages: list[dict], max_tokens: int = 800,
 
 
 def complete_sync(messages: list[dict], max_tokens: int = 800,
-                  temperature: float = 0.5) -> str:
+                  temperature: float = 0.5, whole: bool = False) -> str:
     """Version bloquante (résumés mémoire, scripts). Rien ne presse ici : le cerveau
-    principal, plus soigneux, s'il est configuré ; sinon le cerveau choisi."""
+    principal, plus soigneux, s'il est configuré ; sinon le cerveau choisi.
+    whole=True : erreur si la réponse a été coupée par max_tokens (la réflexion des
+    modèles « thinking » compte dans cette limite)."""
     brain = "main" if _configured("main") else _brain
     client = get_sync_client(brain)
     kwargs = dict(model=BRAINS[brain]["model"], messages=messages,
@@ -277,6 +314,8 @@ def complete_sync(messages: list[dict], max_tokens: int = 800,
         if not _drop_extra(brain, e):
             raise
         resp = client.chat.completions.create(**kwargs)
+    if whole and resp.choices[0].finish_reason == "length":
+        raise RuntimeError(f"réponse coupée à {max_tokens} jetons")
     return (resp.choices[0].message.content or "").strip()
 
 

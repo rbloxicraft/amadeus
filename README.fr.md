@@ -141,8 +141,10 @@ Aucun modèle de personnage n'est fourni : ils ont chacun leur propre licence.
 |---|---|
 | `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | Cerveau principal : clé, adresse de l'API, nom du modèle |
 | `LLM_DISABLE_THINKING` | `true` (défaut) : coupe la « réflexion » des modèles qui en ont une, ~2 s au lieu de 10+ avant le premier mot |
-| `GROQ_API_KEY` | Cerveau rapide (Groq), facultatif |
-| `BRAIN` | Cerveau au tout premier lancement : `main` ou `gptoss` (rapide) |
+| `GROQ_API_KEY` | Cerveau rapide (Groq), facultatif. Sert aussi à la recherche web de Kurisu |
+| `DEEPSEEK_API_KEY` | Cerveau DeepSeek, facultatif (payant, très peu cher) : rapide et régulier, sans quota par minute ; aussi le secours quand le quota gratuit de Groq est épuisé |
+| `BRAIN` | Cerveau au tout premier lancement : `main`, `gptoss` (rapide) ou `deepseek` |
+| `WEATHER_CITY` | Ville par défaut de l'outil météo (Kurisu connaît aussi la date et l'heure, et peut chercher sur le web) |
 | `STT_MODEL` | `large-v3-turbo` (défaut), `medium`, `small` (machines modestes) |
 | `STT_LANGUAGE` | `auto` (défaut) ou `fr` : plus fiable pour les phrases courtes |
 | `STT_PARTIALS` | Transcription en direct pendant que tu parles. `auto` (défaut) : active avec une carte NVIDIA ; `on` ; `off` |
