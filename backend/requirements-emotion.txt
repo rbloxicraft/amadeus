@@ -1,0 +1,4 @@
+# Facultatif : détection d'émotion dans la voix (emotion2vec, sur CPU, plus de 1 Go).
+# Installer dans le venv du backend, puis mettre VOICE_EMOTION=on dans backend\.env
+funasr>=1.2
+soundfile>=0.12

@@ -22,6 +22,7 @@ from .config import CONFIG
 log = logging.getLogger("amadeus.memory")
 
 _lock = threading.Lock()
+_embed_lock = threading.Lock()
 _client = None
 _collection = None
 _embedder = None
@@ -48,7 +49,9 @@ def _get_collection():
 
 
 def _embed(texts: list[str]) -> list[list[float]]:
-    return _get_embedder().encode(texts, normalize_embeddings=True).tolist()
+    # verrou dédié : le tokenizer n'accepte pas deux appels simultanés
+    with _embed_lock:
+        return _get_embedder().encode(texts, normalize_embeddings=True).tolist()
 
 
 def warmup() -> None:
@@ -88,9 +91,10 @@ def store_exchange(user_text: str, reply_text: str) -> None:
         "ts": ts,
     }
     try:
+        # calcul hors du verrou de la base : archiver ne doit pas retarder la phrase suivante
+        emb = _embed([f"U: {user_text}\nK: {reply_text}"])[0]
         with _lock:
             col = _get_collection()
-            emb = _embed([f"U: {user_text}\nK: {reply_text}"])[0]
             col.add(
                 ids=[f"ex-{uuid.uuid4().hex}"],
                 embeddings=[emb],
@@ -136,43 +140,53 @@ def _update_profile(exchanges: list[dict]) -> None:
 
 # ---------------------------------------------------------------- retrieval
 
-def retrieve_relevant(query: str, k: int | None = None) -> list[dict]:
-    """Récupère les k échanges les plus proches sémantiquement."""
+def retrieve_relevant(query: str, k: int | None = None,
+                      exclude_users: set[str] | None = None) -> list[dict]:
+    """Récupère les k échanges les plus proches sémantiquement.
+
+    `exclude_users` : messages déjà présents dans l'historique envoyé au LLM. Chaque échange
+    est archivé tout de suite : sans ce filtre, on paierait deux fois le même texte."""
     k = k or CONFIG.MEMORY_RETRIEVE_K
+    exclude = {u.strip()[:1000] for u in (exclude_users or ())}
     try:
+        emb = _embed([query])[0]
         with _lock:
             col = _get_collection()
             n = col.count()
             if n == 0:
                 return []
-            emb = _embed([query])[0]
-            res = col.query(query_embeddings=[emb], n_results=min(k, n))
+            res = col.query(query_embeddings=[emb], n_results=min(k + len(exclude), n))
         out = []
         for doc in res["documents"][0]:
             try:
-                out.append(json.loads(doc))
+                hit = json.loads(doc)
             except json.JSONDecodeError:
                 continue
+            if hit.get("user", "").strip() not in exclude:
+                out.append(hit)
+            if len(out) == k:
+                break
         return out
     except Exception:
         log.exception("Échec du retrieval mémoire")
         return []
 
 
-def memory_context(query: str) -> str:
-    """Bloc 'MÉMOIRE' injecté dans le prompt système."""
-    profile = get_profile()
-    hits = retrieve_relevant(query)
-    if not profile and not hits:
+def profile_block(profile: str) -> str:
+    """Profil : stable d'un tour à l'autre, il reste dans le préfixe mis en cache par l'API."""
+    if not profile:
         return ""
-    parts = ["# Amadeus memory subsystem (context from long-term memory — use naturally)"]
-    if profile:
-        parts.append("## Memory profile (who the user is, your shared history):\n" + profile)
-    if hits:
-        lines = [f"- [{h.get('ts', '?')}] User: {h.get('user', '')} | You: {h.get('kurisu', '')}"
-                 for h in hits]
-        parts.append("## Most relevant past exchanges:\n" + "\n".join(lines))
-    return "\n\n".join(parts)
+    return ("# Amadeus memory subsystem (context from long-term memory — use naturally)\n\n"
+            "## Memory profile (who the user is, your shared history):\n" + profile)
+
+
+def retrieved_block(hits: list[dict]) -> str:
+    """Souvenirs du tour : ils changent à chaque message, donc placés après l'historique."""
+    if not hits:
+        return ""
+    lines = [f"- [{h.get('ts', '?')}] User: {h.get('user', '')} | You: {h.get('kurisu', '')}"
+             for h in hits]
+    return "## Most relevant past exchanges:\n" + "\n".join(lines)
 
 
 def wipe() -> None:

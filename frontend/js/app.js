@@ -1,6 +1,6 @@
 /* Amadeus — démarrage, dialogue (SSE), voix en streaming, mains libres, mémoire, avatar. */
 import { avatar } from './avatar.js?v=27';
-import { AudioSys, TtsStream, Recorder, HandsFree } from './audio.js?v=27';
+import { AudioSys, TtsStream, Recorder, HandsFree } from './audio.js?v=28';
 import { portrait } from './portrait.js?v=1';
 import { screenBg } from './screenbg.js?v=5';
 
@@ -176,18 +176,20 @@ const speech = {
   current: null,
   gen: 0,
 
-  enqueue(key, ja, emotion = 'neutral', fr = '') {
+  enqueue(key, ja, emotion = 'neutral', fr = '', { onPlay = null, filler = false } = {}) {
     if (!ja) return;
-    this.items.push({ key, ja, fr, emotion, stream: new TtsStream(ja, emotion) });
+    this.items.push({ key, ja, fr, emotion, onPlay, filler, stream: new TtsStream(ja, emotion) });
     this._pump();
   },
 
-  /* la traduction d'une phrase arrive après sa voix : on complète le sous-titre */
+  /* la traduction d'une phrase arrive après sa voix : on complète le sous-titre
+     (une ligne peut être dite en deux morceaux, qui partagent la même clé) */
   setFr(key, fr) {
-    const it = this.items.find((x) => x.key === key) || (this.current?.key === key ? this.current : null);
-    if (!it) return;
-    it.fr = fr;
-    if (it === this.current) subtitle.show(fr || it.ja, fr ? it.ja : '');
+    const parts = [...this.items, this.current].filter((x) => x?.key === key);
+    for (const it of parts) {
+      it.fr = fr;
+      if (it === this.current) subtitle.show(fr || it.ja, fr ? it.ja : '');
+    }
   },
 
   get active() { return this.playing || this.items.length > 0; },
@@ -213,6 +215,8 @@ const speech = {
         this.recentJa = [...this.recentJa.slice(-3), it.ja];
         const ok = await AudioSys.play(it.stream, () => {
           if (gen !== this.gen) return;
+          it.onPlay?.();
+          if (it.filler) return;   /* simple réaction : le sous-titre attend la vraie phrase */
           subtitle.show(it.fr || it.ja, it.fr ? it.ja : '');
           setEmotion(it.emotion);
         });
@@ -256,7 +260,47 @@ function* sseEvents(chunk, state) {
 
 let turnSeq = 0;
 
-async function sendMessage(text, { lineEl = null } = {}) {
+/* ═══════════ Réactions immédiates ═══════════
+   Si la réponse tarde, elle dit « ふーん… » : le silence paraît bien moins long. */
+
+const FILLER_AFTER_MS = 650;
+let reactions = [];
+let lastReaction = '';
+
+async function loadReactions(tries = 20) {
+  try {
+    const r = await fetch('/api/reactions');
+    if (r.ok) reactions = (await r.json()).reactions || [];
+  } catch { /* serveur pas encore prêt */ }
+  /* elles sont générées après le préchauffage de GPT-SoVITS */
+  if (!reactions.length && tries > 1) setTimeout(() => loadReactions(tries - 1), 15000);
+}
+
+function pickReaction() {
+  const choices = reactions.filter((x) => x !== lastReaction);
+  const pick = choices[Math.floor(Math.random() * choices.length)] || reactions[0] || '';
+  lastReaction = pick;
+  return pick;
+}
+
+/* Mesure d'un tour : fin de ta phrase → premier son, écrite dans data/voice_diag.log */
+function reportLatency(c) {
+  if (!c || c.reported || !c.server || !c.firstVoice) return;
+  c.reported = true;
+  const since = (t) => (t ? Math.round(t - c.speechEnd) : null);
+  AudioSys.diag('latence', {
+    fin_phrase_a_validation_ms: since(c.commit),
+    transcription_ms: since(c.final),
+    envoi_llm_ms: since(c.chat),
+    premiere_phrase_ms: since(c.firstSay),
+    premier_son_ms: since(c.firstSound),
+    premiere_voix_ms: since(c.firstVoice),
+    stt: c.stt || null,
+    serveur: c.server,
+  });
+}
+
+async function sendMessage(text, { lineEl = null, voice = '', clock = null, replaces = '' } = {}) {
   text = text.trim();
   if (!text) return;
   /* une nouvelle question coupe la réponse et la voix en cours */
@@ -266,6 +310,16 @@ async function sendMessage(text, { lineEl = null } = {}) {
   const abort = new AbortController();
   chatAbort = abort;
   const turn = ++turnSeq;
+  if (clock) clock.chat = performance.now();
+  const filler = clock && reactions.length ? pickReaction() : '';
+  let sayCount = 0;
+  const fillerTimer = filler ? setTimeout(() => {
+    if (sayCount || chatAbort !== abort) return;
+    speech.enqueue(`${turn}:filler`, filler, 'neutral', '', {
+      filler: true,
+      onPlay: () => { clock.firstSound ||= performance.now(); },
+    });
+  }, Math.max(0, clock.commit + FILLER_AFTER_MS - performance.now())) : 0;
   setBusy(true);
   if (!lineEl) addLine('user', text);
   $('#msg-input').value = '';
@@ -283,7 +337,7 @@ async function sendMessage(text, { lineEl = null } = {}) {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, session_id: SESSION }),
+      body: JSON.stringify({ message: text, session_id: SESSION, voice, filler, replaces }),
       signal: abort.signal,
     });
     if (!resp.ok || !resp.body) throw new Error(`le serveur a répondu ${resp.status}`);
@@ -298,7 +352,16 @@ async function sendMessage(text, { lineEl = null } = {}) {
         if (ev === 'meta') {
           setEmotion(d.emotion);
         } else if (ev === 'say') {
-          speech.enqueue(`${turn}:${d.i}`, d.ja, d.emotion);
+          sayCount++;
+          clearTimeout(fillerTimer);
+          if (clock) clock.firstSay ||= performance.now();
+          speech.enqueue(`${turn}:${d.i}`, d.ja, d.emotion, '', {
+            onPlay: clock ? () => {
+              clock.firstVoice ||= performance.now();
+              clock.firstSound ||= clock.firstVoice;
+              reportLatency(clock);
+            } : null,
+          });
         } else if (ev === 'line') {
           speech.setFr(`${turn}:${d.i}`, d.fr);
         } else if (ev === 'token') {
@@ -307,6 +370,7 @@ async function sendMessage(text, { lineEl = null } = {}) {
           $('#chat').scrollTop = $('#chat').scrollHeight;
         } else if (ev === 'done') {
           final = d;
+          if (clock) { clock.server = d.timing || {}; reportLatency(clock); }
         } else if (ev === 'error') {
           throw new Error(d.message);
         }
@@ -325,6 +389,7 @@ async function sendMessage(text, { lineEl = null } = {}) {
     addLine('error', explainError(e.message));
     subtitle.hide(0);
   } finally {
+    clearTimeout(fillerTimer);
     if (chatAbort === abort) {
       chatAbort = null;
       setBusy(false);
@@ -359,43 +424,94 @@ function isEcho(text) {
   return hit / (t.length - 1) >= 0.6;
 }
 
+/* Une fin de phrase anticipée peut couper une pensée : si tu reprends aussitôt, avant
+   d'avoir entendu sa réponse, les deux morceaux repartent comme un seul message. */
+const MERGE_WINDOW_MS = 1500;
+let lastVoiceTurn = null;
+
+/* Décide du sort d'une phrase transcrite. `confirmed` : elle a déjà été coupée. */
+function acceptTranscript(text, { quiet, bargeIn, confirmed = false, li = null, voice = '', clock = null }) {
+  let reject = '';
+  if (text.replace(/[\s.,!?…。、]/g, '').length < 2) reject = 'rien de compréhensible';
+  else if (quiet && STT_HALLUCINATION.test(text)) reject = 'bruit';
+  else if (bargeIn && !confirmed && isEcho(text)) reject = 'écho de sa voix';
+  if (reject) {
+    li?.remove();
+    if (bargeIn) {
+      AudioSys.diag('faux départ ignoré', { cause: reject, texte: text });
+      if (!confirmed) AudioSys.duck(false);
+    } else if (!quiet) toast("Je n'ai rien entendu. Réessaie en parlant un peu plus fort.");
+    return;
+  }
+  const prev = lastVoiceTurn;
+  let replaces = '';
+  /* même si elle a commencé à répondre, un début de phrase visiblement inachevé se recolle */
+  if (clock?.speechStartAt && prev?.clock && prev.li?.isConnected
+      && clock.speechStartAt - prev.clock.commit < MERGE_WINDOW_MS
+      && (!prev.clock.firstVoice || prev.clock.unfinished)) {
+    li?.remove();
+    replaces = prev.text;
+    const start = prev.clock.unfinished ? prev.text.replace(/[\s.,…]+$/, '') : prev.text;
+    text = `${start} ${text}`;
+    li = prev.li;
+    voice = [prev.voice, voice].filter(Boolean).join('; ');
+  }
+  if (li) {
+    li.textContent = text;
+    li.classList.remove('pending');
+  } else li = addLine('user', text);
+  lastVoiceTurn = clock ? { text, li, voice, clock } : null;
+  sendMessage(text, { lineEl: li, voice, clock, replaces });
+}
+
 /* bargeIn : tu as parlé pendant qu'elle parlait. Elle a seulement baissé la voix ;
    on ne la coupe que si ta phrase est réelle (ni bruit, ni son propre écho). */
-async function transcribeAndSend(blob, { quiet = false, bargeIn = false } = {}) {
-  let li = null;
-  if (!bargeIn) {
+async function transcribeAndSend(blob, { quiet = false, bargeIn = false, confirmed = false,
+  trimmed = false, line = null, clock = null } = {}) {
+  let li = line;
+  if (!bargeIn && !li) {
     li = addLine('user', '…');
     li.classList.add('pending');
   }
   try {
     const fd = new FormData();
     fd.append('audio', blob, blob.type.includes('wav') ? 'speech.wav' : 'speech.webm');
+    fd.append('trimmed', trimmed ? 'true' : 'false');
+    fd.append('learn', bargeIn ? 'false' : 'true');
     const r = await fetch('/api/stt', { method: 'POST', body: fd });
     if (!r.ok) throw new Error(`STT ${r.status}`);
-    const text = ((await r.json()).text || '').trim();
-    let reject = '';
-    if (text.replace(/[\s.,!?…。、]/g, '').length < 2) reject = 'rien de compréhensible';
-    else if (quiet && STT_HALLUCINATION.test(text)) reject = 'bruit';
-    else if (bargeIn && isEcho(text)) reject = 'écho de sa voix';
-    if (reject) {
-      li?.remove();
-      if (bargeIn) {
-        AudioSys.diag('faux départ ignoré', { cause: reject, texte: text });
-        AudioSys.duck(false);
-      } else if (!quiet) toast("Je n'ai rien entendu. Réessaie en parlant un peu plus fort.");
-      return;
-    }
-    if (li) {
-      li.textContent = text;
-      li.classList.remove('pending');
-    } else li = addLine('user', text);
-    sendMessage(text, { lineEl: li });
+    const res = await r.json();
+    if (clock) clock.final = performance.now();
+    acceptTranscript((res.text || '').trim(), { quiet, bargeIn, confirmed, li, voice: res.voice || '', clock });
   } catch (err) {
     li?.remove();
-    if (bargeIn) AudioSys.duck(false);
+    if (bargeIn && !confirmed) AudioSys.duck(false);
     toast('Transcription impossible : ' + err.message);
   }
 }
+
+/* Dès que des mots réels sont reconnus, elle se tait, sans attendre la fin de ta phrase. */
+function confirmBargeIn(text, u) {
+  if (!u.bargeIn || u.confirmed) return;
+  if (normSpeech(text).length < 4 || STT_HALLUCINATION.test(text) || isEcho(text)) return;
+  u.confirmed = true;
+  chatAbort?.abort();
+  speech.interrupt('tu parles');
+  subtitle.hide(0);
+}
+
+function showPartial(text, u) {
+  confirmBargeIn(text, u);
+  if (u.bargeIn && !u.confirmed) return;   /* peut-être son écho : rien à afficher */
+  if (!u.li) {
+    u.li = addLine('user', '');
+    u.li.classList.add('pending');
+  }
+  u.li.textContent = text;
+  $('#chat').scrollTop = $('#chat').scrollHeight;
+}
+
+const clockOf = (u) => ({ speechEnd: u.speechEndAt, commit: u.commitAt, speechStartAt: u.startAt, unfinished: u.unfinished });
 
 /* ═══════════ Micro : mains libres ou maintenir pour parler ═══════════ */
 
@@ -441,20 +557,45 @@ async function setHandsFree(on, { silent = false } = {}) {
 let bargeIn = false;
 
 function setupMic() {
+  HandsFree.connectLive(SESSION);
+  loadReactions();
   HandsFree.handlers = {
+    wouldBargeIn: () => speech.active || busy,
     onStart: () => {
       micUi('talk');
-      /* elle parle (ou va répondre) : elle baisse la voix et t'écoute. Elle ne se tait
-         pour de bon qu'une fois ta phrase transcrite : un bruit, une toux ou l'écho de
-         sa propre voix ne lui coupent plus la parole. */
+      /* elle parle (ou va répondre) : elle baisse la voix et t'écoute. Elle se tait dès
+         que de vrais mots sont reconnus : un bruit, une toux ou l'écho de sa propre voix
+         ne lui coupent plus la parole. */
       bargeIn = speech.active || busy;
       if (bargeIn) AudioSys.duck(true);
     },
-    onEnd: (audio) => {
+    onPartial: showPartial,
+    onCommit: () => {
       micUi('listen');
-      const b = bargeIn;
       bargeIn = false;
-      transcribeAndSend(HandsFree.toWav(audio), { quiet: true, bargeIn: b });
+    },
+    onFinal: (m, u) => {
+      const clock = { ...clockOf(u), final: performance.now(), stt: m.timing || null };
+      acceptTranscript((m.text || '').trim(), {
+        quiet: true, bargeIn: u.bargeIn, confirmed: u.confirmed, li: u.li, voice: m.voice || '', clock,
+      });
+    },
+    onCancel: (u) => {
+      micUi('listen');
+      u.li?.remove();
+      if (u.bargeIn && !u.confirmed) AudioSys.duck(false);
+      if (u.bargeIn) bargeIn = false;
+    },
+    /* secours sans liaison directe ; `u` : phrase dont la transcription directe a échoué */
+    onEnd: (audio, u) => {
+      micUi('listen');
+      const b = u ? u.bargeIn : bargeIn;
+      bargeIn = false;
+      const now = performance.now();
+      const clock = u ? clockOf(u) : { speechEnd: now, commit: now, speechStartAt: null };
+      transcribeAndSend(HandsFree.toWav(audio), {
+        quiet: true, bargeIn: b, confirmed: !!u?.confirmed, trimmed: true, line: u?.li || null, clock,
+      });
     },
     onMisfire: () => {
       micUi('listen');

@@ -145,6 +145,11 @@ Aucun modèle de personnage n'est fourni : ils ont chacun leur propre licence.
 | `BRAIN` | Cerveau au tout premier lancement : `main` ou `gptoss` (rapide) |
 | `STT_MODEL` | `large-v3-turbo` (défaut), `medium`, `small` (machines modestes) |
 | `STT_LANGUAGE` | `auto` (défaut) ou `fr` : plus fiable pour les phrases courtes |
+| `STT_PARTIALS` | Transcription en direct pendant que tu parles. `auto` (défaut) : active avec une carte NVIDIA ; `on` ; `off` |
+| `VOICE_ANALYSIS` | `true` (défaut) : indique à Kurisu comment tu as parlé (débit, hauteur, pauses) par rapport à ta voix habituelle |
+| `VOICE_EMOTION` | `false` (défaut). `true` ajoute emotion2vec sur processeur, après installation de `backend\requirements-emotion.txt` (plus de 1 Go) |
+| `TTS_EARLY_PHRASE` | `true` (défaut) : la voix démarre sur le premier segment de la réponse |
+| `TTS_REACTIONS` | `true` (défaut) : joue une courte réaction pré-générée si la réponse tarde |
 | `TTS_STREAMING_MODE` | `3` (défaut) : voix régulière, sans blanc ; `0` : désactivé |
 | `TTS_TEMPERATURE` / `TTS_TOP_K` / `TTS_TOP_P` | `0.7` / `5` / `0.9` : voix stable |
 | `TTS_LOUDNESS_DB` | `-16` : même volume pour toutes les émotions |
@@ -159,7 +164,7 @@ Aucun modèle de personnage n'est fourni : ils ont chacun leur propre licence.
 | Un service ne démarre pas | `start_amadeus.bat` indique lequel ; sa fenêtre (Amadeus-Voix, réduite, ou Amadeus-Backend) montre l'erreur. `stop_amadeus.bat`, puis relance |
 | Le micro ne marche pas | Autorise le micro pour `127.0.0.1` dans ton navigateur (icône à gauche de l'adresse) |
 | Voix qui coupe | Chaque trou de son et chaque interruption sont notés dans `data\voice_diag.log` |
-| Réponses lentes | Essaie le cerveau rapide (Réglages → Cerveau) |
+| Réponses lentes | Essaie le cerveau rapide (Réglages → Cerveau). Les temps de chaque tour vocal et le taux de cache de l'API sont notés (`latence`) dans `data\voice_diag.log` |
 | VRM refusé | Le fichier doit être un `.vrm` valide (export VRoid Studio, par exemple) |
 
 ## Structure

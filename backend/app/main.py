@@ -15,23 +15,27 @@ import json
 import re
 import logging
 import threading
+import time
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import (FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import memory, stt, tts
+from . import emotion, live, memory, stt, tts, voice
 from .config import CONFIG
 from .dialogue import LineParser
 from . import llm
 from .llm import complete, is_configured, stream_chat
 from .persona import (BOOT_GREETING_PROMPT, FIRST_BOOT_GREETING, JA_TRANSLATE_PROMPT,
-                      EMOTIONS, STYLE_BOOST, SUBTITLE_TRANSLATE_PROMPT, SYSTEM_PROMPT)
+                      EMOTIONS, STYLE_BOOST, SUBTITLE_TRANSLATE_PROMPT, SYSTEM_PROMPT,
+                      stable_system, with_turn_context)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("amadeus")
@@ -55,6 +59,7 @@ def _warmup() -> None:
             _warm["stt"] = True
         except Exception:
             log.exception("Préchargement Whisper impossible")
+    emotion.warmup()
 
 
 @asynccontextmanager
@@ -67,9 +72,17 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Amadeus", docs_url=None, redoc_url=None, lifespan=lifespan)
 
-# Historique de conversation par session (en mémoire vive)
-_histories: dict[str, list[dict]] = defaultdict(list)
+
+@dataclass
+class _Session:
+    """Conversation en mémoire vive."""
+    history: list[dict] = field(default_factory=list)
+    profile: str | None = None   # profil figé (None = à relire)
+
+
+_sessions: dict[str, _Session] = defaultdict(_Session)
 _hist_lock = threading.Lock()
+_memory_prefetch = live.MemoryPrefetch()
 
 
 # ------------------------------------------------------------------ helpers
@@ -112,17 +125,40 @@ async def _subtitle(i: int, ja: str, user_message: str) -> tuple[int, str]:
         return i, ""
 
 
-def _session_history(session_id: str) -> list[dict]:
+def _session_view(session_id: str) -> tuple[list[dict], str]:
+    """Historique et profil tels qu'envoyés au LLM.
+
+    Le profil est figé pour la session jusqu'au prochain élagage de l'historique : le
+    réécrire entre-temps invaliderait le cache de l'API pour tout ce qui le suit."""
     with _hist_lock:
-        return list(_histories[session_id][-CONFIG.HISTORY_MAX_MESSAGES:])
+        s = _sessions[session_id]
+        if s.profile is None:
+            s.profile = memory.get_profile()
+        return list(s.history), s.profile
 
 
 def _remember_turn(session_id: str, user: str, assistant_raw: str) -> None:
     with _hist_lock:
-        h = _histories[session_id]
-        h.append({"role": "user", "content": user})
-        h.append({"role": "assistant", "content": assistant_raw})
-        del h[:-CONFIG.HISTORY_MAX_MESSAGES]
+        s = _sessions[session_id]
+        s.history.append({"role": "user", "content": user})
+        s.history.append({"role": "assistant", "content": assistant_raw})
+        if len(s.history) > CONFIG.HISTORY_MAX_MESSAGES:
+            del s.history[:-CONFIG.HISTORY_KEEP_MESSAGES]
+            s.profile = None   # le cache repart de zéro ici : autant prendre le profil à jour
+
+
+def _forget_turn(session_id: str, user: str) -> None:
+    """La phrase était coupée en deux : son début et la réponse à ce début disparaissent."""
+    with _hist_lock:
+        h = _sessions[session_id].history
+        if len(h) >= 2 and h[-2] == {"role": "user", "content": user}:
+            del h[-2:]
+
+
+def _retrieve_for(session_id: str, query: str) -> list[dict]:
+    history, _ = _session_view(session_id)
+    return memory.retrieve_relevant(
+        query, exclude_users={m["content"] for m in history if m["role"] == "user"})
 
 
 # ------------------------------------------------------------------ chat SSE
@@ -148,15 +184,36 @@ async def chat(body: dict):
     session_id = body.get("session_id") or str(uuid.uuid4())
     if not message:
         raise HTTPException(400, "message vide")
+    voice_hint = voice.clean_hint(body.get("voice"))
+    filler = body.get("filler") if body.get("filler") in tts.REACTIONS else ""
+    replaces = body.get("replaces") if isinstance(body.get("replaces"), str) else ""
 
     async def gen():
+        t0 = time.perf_counter()
+        ms = lambda: round((time.perf_counter() - t0) * 1000)
+        timing: dict = {}
+        usage: dict = {}
         try:
-            ctx = await run_in_threadpool(memory.memory_context, message)
+            if replaces:
+                _forget_turn(session_id, replaces)
+            history, profile = await run_in_threadpool(_session_view, session_id)
+            hits = _memory_prefetch.take(session_id, message)
+            timing["memory_prefetched"] = hits is not None
+            if hits is None:
+                hits = await run_in_threadpool(_retrieve_for, session_id, message)
+            else:
+                # cherché avant la fin de la phrase : l'historique a pu avancer depuis
+                seen = {m["content"].strip()[:1000] for m in history if m["role"] == "user"}
+                hits = [h for h in hits if h.get("user", "").strip() not in seen]
+            timing["memory_ms"] = ms()
             # le cerveau principal tient le personnage seul ; GPT-OSS reçoit un renfort de style
             persona = SYSTEM_PROMPT + (STYLE_BOOST if llm.current_brain() == "gptoss" else "")
-            messages = [{"role": "system", "content": persona + ("\n\n" + ctx if ctx else "")}]
-            messages += _session_history(session_id)
-            messages.append({"role": "user", "content": message})
+            # du plus stable au plus variable : l'API réutilise le début commun des requêtes
+            messages = [{"role": "system",
+                         "content": stable_system(persona, memory.profile_block(profile))}]
+            messages += history
+            messages.append({"role": "user", "content": with_turn_context(
+                message, memory.retrieved_block(hits), voice_hint, filler)})
             if llm.current_brain() == "gptoss" and _user_language(message) != "Japanese":
                 # GPT-OSS oublie la langue des sous-titres au milieu d'un long contexte :
                 # un rappel en toute fin, juste avant sa réponse
@@ -165,7 +222,9 @@ async def chat(body: dict):
                     f"Reminder: reply as Kurisu, 2-3 lines, each `[emotion]<feminine casual Japanese> ||| "
                     f"<same sentence in {lang}>`. The subtitle after ||| MUST be in {lang}."})
 
-            parser = LineParser(user_writes_japanese=bool(_KANA_RE.search(message)))
+            parser = LineParser(user_writes_japanese=bool(_KANA_RE.search(message)),
+                                early_phrase=CONFIG.TTS_EARLY_PHRASE,
+                                early_min_chars=CONFIG.TTS_EARLY_PHRASE_MIN_CHARS)
             meta_sent = False
             subtitles: list[asyncio.Task] = []   # lignes japonaises à sous-titrer
 
@@ -178,6 +237,8 @@ async def chat(body: dict):
                         meta_sent = True
                         yield _sse("meta", {"emotion": ev["emotion"], "session_id": session_id})
                     elif ev["type"] in _FORWARD:
+                        if ev["type"] == "say":
+                            timing.setdefault("first_say_ms", ms())
                         yield _sse(ev["type"], {k: v for k, v in ev.items() if k != "type"})
 
             def ready_subtitles(wait: bool):
@@ -185,7 +246,8 @@ async def chat(body: dict):
                     subtitles.remove(t)
                     yield t
 
-            async for delta in stream_chat(messages):
+            async for delta in stream_chat(messages, usage=usage):
+                timing.setdefault("llm_first_token_ms", ms())
                 for s in relay(parser.feed(delta)):
                     yield s
                 for t in ready_subtitles(False):
@@ -209,7 +271,9 @@ async def chat(body: dict):
             emotion = parser.first_emotion or "neutral"
             reply = parser.reply or parser.say_ja
             _remember_turn(session_id, message, parser.formatted() or parser.raw.strip())
-            yield _sse("done", {"reply": reply, "emotion": emotion})
+            timing["llm_total_ms"] = ms()
+            log.info("tour: %s", json.dumps({**timing, **usage}, ensure_ascii=False))
+            yield _sse("done", {"reply": reply, "emotion": emotion, "timing": {**timing, **usage}})
 
             # Mémoire en arrière-plan (ne bloque pas la réponse)
             threading.Thread(target=memory.store_exchange, args=(message, reply), daemon=True).start()
@@ -229,6 +293,13 @@ async def chat(body: dict):
 _gs_lock = asyncio.Lock()
 
 
+def _abandon(waiter: asyncio.Future) -> None:
+    """Renonce à une demande de verrou ; si elle vient d'aboutir, le verrou est rendu."""
+    waiter.cancel()
+    waiter.add_done_callback(
+        lambda w: _gs_lock.release() if not w.cancelled() and w.exception() is None else None)
+
+
 class _GsTurn:
     """Tour de parole auprès de GPT-SoVITS pour une requête (libération idempotente)."""
 
@@ -236,15 +307,20 @@ class _GsTurn:
         self.held = False
 
     async def acquire(self, request: Request) -> bool:
-        """Attend son tour ; False si le navigateur a abandonné la phrase entre-temps."""
-        while True:
-            if await request.is_disconnected():
-                return False
-            try:
-                await asyncio.wait_for(_gs_lock.acquire(), timeout=0.25)
-                break
-            except asyncio.TimeoutError:
-                continue
+        """Attend son tour ; False si le navigateur a abandonné la phrase entre-temps.
+
+        Une seule demande de verrou pendant toute l'attente : l'annuler et la refaire
+        renverrait la phrase en fin de file, et la phrase 3 passerait avant la phrase 2."""
+        waiter = asyncio.ensure_future(_gs_lock.acquire())
+        try:
+            while not waiter.done():
+                await asyncio.wait({waiter}, timeout=0.25)
+                if not waiter.done() and await request.is_disconnected():
+                    _abandon(waiter)
+                    return False
+        except BaseException:
+            _abandon(waiter)
+            raise
         self.held = True
         if await request.is_disconnected():
             self.release()
@@ -341,15 +417,61 @@ async def api_tts(body: dict, request: Request):
 
 
 @app.post("/api/stt")
-async def api_stt(audio: UploadFile = File(...)):
+async def api_stt(audio: UploadFile = File(...), trimmed: bool = Form(False), learn: bool = Form(True)):
+    """Phrase complète (maintenir pour parler, ou secours si le WebSocket est coupé)."""
     data = await audio.read()
     if not data:
         raise HTTPException(400, "audio vide")
     try:
-        return await run_in_threadpool(stt.transcribe, data)
+        pcm = await run_in_threadpool(stt.decode, data)
+        mood = (asyncio.ensure_future(run_in_threadpool(emotion.classify, pcm))
+                if emotion.enabled() else None)
+        # déjà découpé par le VAD du navigateur : inutile de le repasser dans celui de Whisper
+        words, features = await asyncio.gather(
+            run_in_threadpool(stt.transcribe_pcm, pcm, vad=not trimmed),
+            run_in_threadpool(voice.safe_analyze, pcm),
+        )
+        hint = await run_in_threadpool(voice.summarize, features, words["text"],
+                                       await emotion.settle(mood), learn)
+        return {**words, "voice": hint}
     except Exception:
         log.exception("Erreur STT")
         raise HTTPException(502, "STT indisponible")
+
+
+def _local_origin(origin: str | None) -> bool:
+    """Un WebSocket échappe à la règle de même origine : sans ce contrôle, n'importe quel
+    site ouvert dans le navigateur pourrait se connecter à ce serveur local."""
+    return origin in {f"http://127.0.0.1:{CONFIG.PORT}", f"http://localhost:{CONFIG.PORT}"}
+
+
+@app.websocket("/api/listen")
+async def api_listen(ws: WebSocket, session: str = ""):
+    """Micro en direct : voir app/live.py."""
+    if not _local_origin(ws.headers.get("origin")):
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    sid = session[:64] or str(uuid.uuid4())
+    listener = live.LiveListener(ws.send_json, sid, lambda q: _retrieve_for(sid, q), _memory_prefetch)
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes") is not None:
+                listener.on_audio(msg["bytes"])
+            elif msg.get("text") is not None:
+                await listener.on_text(msg["text"])
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await listener.close()
+
+
+@app.get("/api/reactions")
+async def api_reactions():
+    return {"reactions": tts.reactions_ready() if CONFIG.TTS_REACTIONS else []}
 
 
 # ------------------------------------------------------------------ boot
@@ -445,14 +567,19 @@ async def api_memory_put(body: dict):
     if not profile:
         raise HTTPException(400, "profil vide — utilise DELETE pour tout effacer")
     await run_in_threadpool(memory.save_profile, profile)
+    with _hist_lock:
+        for s in _sessions.values():
+            s.profile = None   # modification manuelle : prise en compte tout de suite
     return {"ok": True, "size": len(profile)}
 
 
 @app.delete("/api/memory")
 async def api_memory_delete():
     await run_in_threadpool(memory.wipe)
+    await run_in_threadpool(voice.baseline().clear)
+    _memory_prefetch.clear()
     with _hist_lock:
-        _histories.clear()
+        _sessions.clear()
     return {"ok": True}
 
 

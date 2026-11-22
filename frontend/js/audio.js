@@ -9,6 +9,7 @@
 const GAP_BETWEEN_SENTENCES = 0.12;   /* respiration naturelle entre deux phrases (s) */
 const START_BUFFER = 0.8;             /* audio d'avance voulu avant de démarrer une phrase (s) */
 const START_WAIT_MAX = 0.35;          /* attente maximale pour ce tampon (s) */
+const START_WAIT_MIN = 0.08;          /* attente quand le GPU a largement de l'avance (s) */
 const UNDERRUN_PAD = 0.12;            /* marge de reprise après un retard (s) */
 const DUCK_LEVEL = 0.18;              /* volume de Kurisu pendant que tu lui parles */
 const LIP_MAX = 0.65;                 /* ouverture max d'un visème */
@@ -63,8 +64,12 @@ const AudioSys = {
     let started = false;
     /* Tampon de démarrage : GPT-SoVITS envoie parfois un 1er morceau court (~0,6 s)
        suivi d'une pause ; démarrer trop tôt crée un blanc au milieu de la phrase.
-       On attend d'avoir START_BUFFER d'audio d'avance (au plus START_WAIT_MAX). */
-    if (this._nextTime <= ctx.currentTime) await stream.buffered(START_BUFFER, START_WAIT_MAX);
+       On attend d'avoir START_BUFFER d'audio d'avance, d'autant moins longtemps que
+       la génération va vite. */
+    if (this._nextTime <= ctx.currentTime) {
+      await stream.buffered(START_BUFFER, this._startWait());
+      if (this._cautious > 0) this._cautious--;
+    }
     for await (const chunk of stream) {
       if (token !== this._token) return false;
       const buf = chunk instanceof AudioBuffer ? chunk : this._toBuffer(chunk, stream.sampleRate);
@@ -74,7 +79,10 @@ const AudioSys = {
          un peu de marge plutôt que de hacher mot par mot */
       const late = started && this._nextTime < ctx.currentTime;
       const t = Math.max(this._nextTime + gap, ctx.currentTime + (late ? UNDERRUN_PAD : 0.03));
-      if (late) this.diag('trou', { s: +(t - this._nextTime).toFixed(2), recu: +stream.seconds.toFixed(2), texte: stream.text });
+      if (late) {
+        this._cautious = 3;   /* un trou : on reprend le grand tampon pour quelques phrases */
+        this.diag('trou', { s: +(t - this._nextTime).toFixed(2), recu: +stream.seconds.toFixed(2), texte: stream.text });
+      }
       const src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(this.out);
@@ -92,6 +100,19 @@ const AudioSys = {
       await new Promise((r) => setTimeout(r, Math.min(100, (this._nextTime - ctx.currentTime - 0.15) * 1000)));
     }
     return started && token === this._token;
+  },
+
+  /* Attente du tampon selon la vitesse mesurée (secondes d'audio par seconde de calcul) :
+     inconnue ou proche du temps réel → prudence ; 2× ou plus → démarrage quasi immédiat. */
+  _genRatio: null,
+  _cautious: 0,
+  _startWait() {
+    if (this._cautious > 0 || this._genRatio === null) return START_WAIT_MAX;
+    const k = Math.min(1, Math.max(0, (this._genRatio - 1.2) / 0.8));
+    return START_WAIT_MAX - k * (START_WAIT_MAX - START_WAIT_MIN);
+  },
+  noteGeneration(ratio) {
+    this._genRatio = this._genRatio === null ? ratio : this._genRatio * 0.7 + ratio * 0.3;
   },
 
   /* Baisse (on) ou rétablit (off) sa voix en douceur, sans rien couper. */
@@ -225,9 +246,16 @@ class TtsStream {
     let head = new Uint8Array(0);
     let dataStarted = false;
     let carry = null;  /* octet orphelin entre deux morceaux */
+    let firstAt = 0;
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        /* vitesse réelle de génération ; un fichier déjà en cache arrive d'un bloc */
+        const took = firstAt ? (performance.now() - firstAt) / 1000 : 0;
+        if (took > 0.25 && this.seconds > 0.5) AudioSys.noteGeneration(this.seconds / took);
+        break;
+      }
+      firstAt ||= performance.now();
       let bytes = value;
       if (!dataStarted) {
         head = concat(head, bytes);
@@ -350,14 +378,206 @@ const ORT_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.1/dist/';
 const CALM = { positiveSpeechThreshold: 0.6, negativeSpeechThreshold: 0.4, minSpeechMs: 250 };
 const WHILE_SHE_TALKS = { positiveSpeechThreshold: 0.85, negativeSpeechThreshold: 0.6, minSpeechMs: 450 };
 
+/* Fin de phrase : le silence attendu dépend de ce qui vient d'être dit (ms). */
+const FRAME_MS = 32;
+const PREPARE_MS = 200;     /* Whisper et la mémoire démarrent, sans certitude */
+const END_COMPLETE_MS = 320;   /* phrase visiblement finie */
+const END_DEFAULT_MS = 550;    /* pas encore de transcription */
+const END_UNFINISHED_MS = 850; /* « parce que… », « euh… » : elle attend la suite */
+const VAD_END_LIVE_MS = END_UNFINISHED_MS + 150;
+const VAD_END_BATCH_MS = 550;
+const PREROLL_FRAMES = 10;  /* ~320 ms d'audio gardées avant le début détecté */
+const FINAL_TIMEOUT_MS = 8000;
+
+/* ------------------------- Liaison directe avec le backend -------------------------
+   Le micro part en PCM 16 kHz pendant que tu parles (voir backend/app/live.py). Si elle
+   tombe, les phrases repartent par POST /api/stt : rien n'est perdu. */
+
+class LiveLink {
+  constructor(session, onMessage, onState) {
+    this.session = session;
+    this.onMessage = onMessage;
+    this.onState = onState;
+    this.ws = null;
+    this._retry = 500;
+    this._closed = false;
+  }
+
+  get ready() { return this.ws?.readyState === WebSocket.OPEN; }
+
+  connect() {
+    if (this._closed || this.ws) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/api/listen?session=${encodeURIComponent(this.session)}`);
+    ws.binaryType = 'arraybuffer';
+    this.ws = ws;
+    ws.onopen = () => { this._retry = 500; this.onState(true); };
+    ws.onmessage = (e) => {
+      if (typeof e.data !== 'string') return;
+      try { this.onMessage(JSON.parse(e.data)); } catch (err) { console.warn('[voix] message direct illisible', err); }
+    };
+    ws.onclose = () => {
+      this.ws = null;
+      this.onState(false);
+      if (this._closed) return;
+      setTimeout(() => this.connect(), this._retry);
+      this._retry = Math.min(this._retry * 2, 10000);
+    };
+  }
+
+  send(msg) { if (this.ready) this.ws.send(JSON.stringify(msg)); }
+
+  audio(frames) {
+    if (!this.ready) return;
+    const n = frames.reduce((sum, f) => sum + f.length, 0);
+    const pcm = new Int16Array(n);
+    let p = 0;
+    for (const f of frames) {
+      for (let i = 0; i < f.length; i++) {
+        const s = Math.max(-1, Math.min(1, f[i]));
+        pcm[p++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+    }
+    this.ws.send(pcm.buffer);
+  }
+}
+
 const HandsFree = {
   vad: null,
   on: false,
   speaking: false,
+  link: null,
   _wave: new Uint8Array(512),
   _hasWave: false,
   _strict: false,
-  handlers: { onStart() {}, onEnd() {}, onMisfire() {} },
+  _segment: false,      /* le VAD considère qu'on est dans un tour de parole */
+  _segmentLive: false,  /* ce tour est passé par la liaison directe */
+  _preroll: [],
+  _utt: null,           /* phrase en cours d'envoi */
+  _uid: 0,
+  _pending: new Map(),  /* phrases terminées, en attente de leur transcription */
+  handlers: {
+    wouldBargeIn: () => false, onStart() {}, onEnd() {}, onMisfire() {},
+    onPartial() {}, onCommit() {}, onFinal() {}, onCancel() {},
+  },
+
+  /* Ouvre la liaison directe (facultative : sans elle, comportement par phrase entière). */
+  connectLive(session) {
+    if (this.link) return;
+    this.link = new LiveLink(session, (m) => this._onLive(m), (up) => this._onLinkState(up));
+    this.link.connect();
+  },
+
+  _onLinkState(up) {
+    this.vad?.setOptions({ redemptionMs: up ? VAD_END_LIVE_MS : VAD_END_BATCH_MS });
+    if (!up) for (const u of [...this._pending.values()]) this._fallback(u);
+  },
+
+  _onLive(m) {
+    if (m.t === 'partial') {
+      if (this._utt?.id === m.id) this.handlers.onPartial(m.text, this._utt);
+    } else if (m.t === 'prepared') {
+      if (this._utt?.id === m.id && this._utt.prepared) this._utt.complete = !!m.complete;
+    } else if (m.t === 'final' || m.t === 'error') {
+      const u = this._pending.get(m.id);
+      if (!u) return;
+      if (m.t === 'error') { this._fallback(u); return; }
+      clearTimeout(u.timer);
+      this._pending.delete(m.id);
+      this.handlers.onFinal(m, u);
+    }
+  },
+
+  _fallback(u) {
+    clearTimeout(u.timer);
+    this._pending.delete(u.id);
+    const n = u.frames.reduce((sum, f) => sum + f.length, 0);
+    const audio = new Float32Array(n);
+    let p = 0;
+    for (const f of u.frames) { audio.set(f, p); p += f.length; }
+    this.handlers.onEnd(audio, u);
+  },
+
+  _begin(resumed = false) {
+    this._segmentLive = true;
+    const u = {
+      id: ++this._uid, frames: [...this._preroll], speechMs: 0, silenceMs: 0,
+      prepared: false, complete: null, bargeIn: !!this.handlers.wouldBargeIn(),
+      confirmed: false, li: null, startAt: performance.now(), commitAt: 0, speechEndAt: 0,
+    };
+    this._utt = u;
+    this.link.send({ t: 'start', id: u.id, bargeIn: u.bargeIn });
+    this.link.audio(u.frames);
+    if (resumed) this.handlers.onStart();
+  },
+
+  _commit(u) {
+    this._utt = null;
+    u.commitAt = performance.now();
+    u.speechEndAt = u.commitAt - u.silenceMs;
+    u.unfinished = u.complete === false;
+    this.handlers.onCommit(u);
+    if (!this.link?.ready) { this._fallback(u); return; }
+    this._pending.set(u.id, u);
+    u.timer = setTimeout(() => { if (this._pending.has(u.id)) this._fallback(u); }, FINAL_TIMEOUT_MS);
+    this.link.send({ t: 'commit', id: u.id });
+  },
+
+  _cancel(u) {
+    this._utt = null;
+    this.link?.send({ t: 'cancel', id: u.id });
+    this.handlers.onCancel(u);
+  },
+
+  _onFrame(p, frame) {
+    this._preroll.push(frame);
+    if (this._preroll.length > PREROLL_FRAMES) this._preroll.shift();
+    const opts = this._strict ? WHILE_SHE_TALKS : CALM;
+    const isSpeech = p.isSpeech >= opts.positiveSpeechThreshold;
+    const u = this._utt;
+    if (!u) {
+      /* tu reprends après une fin de phrase anticipée, dans le même tour du VAD */
+      if (this._segment && isSpeech && this.link?.ready) this._begin(true);
+      if (this._utt) this._utt.speechMs += FRAME_MS;
+      return;
+    }
+    u.frames.push(frame);
+    this.link.audio([frame]);
+    if (isSpeech) {
+      u.speechMs += FRAME_MS;
+      if (u.prepared) {
+        u.prepared = false;
+        u.complete = null;
+        this.link.send({ t: 'resume', id: u.id });
+      }
+      u.silenceMs = 0;
+      return;
+    }
+    if (p.isSpeech >= opts.negativeSpeechThreshold) return;
+    u.silenceMs += FRAME_MS;
+    if (u.speechMs < opts.minSpeechMs) {
+      if (u.silenceMs >= END_UNFINISHED_MS) this._cancel(u);   /* bruit bref */
+      return;
+    }
+    if (!u.prepared && u.silenceMs >= PREPARE_MS) {
+      u.prepared = true;
+      this.link.send({ t: 'prepare', id: u.id });
+    }
+    const target = u.complete === true ? END_COMPLETE_MS
+      : u.complete === false ? END_UNFINISHED_MS : END_DEFAULT_MS;
+    if (u.silenceMs >= target) this._commit(u);
+  },
+
+  _onSegmentEnd(audio) {
+    this._segment = false;
+    const u = this._utt;
+    if (u) {
+      const min = (this._strict ? WHILE_SHE_TALKS : CALM).minSpeechMs;
+      if (u.speechMs >= min) this._commit(u); else this._cancel(u);
+    } else if (!this._segmentLive) {
+      this.handlers.onEnd(audio, null);
+    }
+  },
 
   async enable() {
     if (!window.vad?.MicVAD) throw new Error('détecteur de parole non chargé (connexion internet ?)');
@@ -367,15 +587,28 @@ const HandsFree = {
         baseAssetPath: VAD_BASE,
         onnxWASMBasePath: ORT_BASE,
         ...CALM,
-        redemptionMs: 550,      /* silence qui marque la fin de ta phrase */
+        /* silence qui clôt le tour ; avec la liaison directe, _onFrame décide souvent avant */
+        redemptionMs: this.link?.ready ? VAD_END_LIVE_MS : VAD_END_BATCH_MS,
         preSpeechPadMs: 300,
         getStream: () => navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         }),
+        onSpeechStart: () => {
+          this._segment = true;
+          this._segmentLive = false;
+          if (this.link?.ready) this._begin();
+        },
         onSpeechRealStart: () => { this.speaking = true; this.handlers.onStart(); },
-        onSpeechEnd: (audio) => { this.speaking = false; this._hasWave = false; this.handlers.onEnd(audio); },
-        onVADMisfire: () => { this.speaking = false; this._hasWave = false; this.handlers.onMisfire(); },
-        onFrameProcessed: (_p, frame) => {
+        onSpeechEnd: (audio) => { this.speaking = false; this._hasWave = false; this._onSegmentEnd(audio); },
+        onVADMisfire: () => {
+          this.speaking = false;
+          this._hasWave = false;
+          this._segment = false;
+          if (this._utt) this._cancel(this._utt);
+          this.handlers.onMisfire();
+        },
+        onFrameProcessed: (p, frame) => {
+          if (frame) this._onFrame(p, frame);
           if (!this.speaking || !frame) return;
           const n = Math.min(frame.length, this._wave.length);
           for (let i = 0; i < n; i++) this._wave[i] = 128 + Math.max(-127, Math.min(127, frame[i] * 400));
@@ -391,6 +624,9 @@ const HandsFree = {
     this.on = false;
     this.speaking = false;
     this._hasWave = false;
+    this._segment = false;
+    if (this._utt) this._cancel(this._utt);
+    this._preroll = [];
     if (this.vad) await this.vad.pause();
   },
 
